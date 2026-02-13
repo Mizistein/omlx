@@ -378,3 +378,84 @@ class TestDiscoveredModel:
 
         assert model.model_type == "embedding"
         assert model.engine_type == "embedding"
+
+
+class TestTwoLevelDiscovery:
+    """Tests for two-level model discovery."""
+
+    def _make_model(self, path: Path, model_type: str = "llama"):
+        """Helper to create a valid model directory."""
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "config.json").write_text(json.dumps({"model_type": model_type}))
+        (path / "model.safetensors").write_bytes(b"0" * 1000)
+
+    def test_two_level_org_folder(self, tmp_path):
+        """Test discovery through organization folders."""
+        self._make_model(tmp_path / "mlx-community" / "llama-3b")
+        self._make_model(tmp_path / "mlx-community" / "qwen-7b")
+
+        models = discover_models(tmp_path)
+        assert len(models) == 2
+        assert "llama-3b" in models
+        assert "qwen-7b" in models
+
+    def test_mixed_flat_and_org(self, tmp_path):
+        """Test mix of flat models and organization folders."""
+        # Flat model at level 1
+        self._make_model(tmp_path / "mistral-7b")
+        # Org folder with models at level 2
+        self._make_model(tmp_path / "Qwen" / "Qwen3-8B")
+
+        models = discover_models(tmp_path)
+        assert len(models) == 2
+        assert "mistral-7b" in models
+        assert "Qwen3-8B" in models
+
+    def test_multiple_org_folders(self, tmp_path):
+        """Test multiple organization folders."""
+        self._make_model(tmp_path / "mlx-community" / "llama-3b")
+        self._make_model(tmp_path / "Qwen" / "Qwen3-8B")
+        self._make_model(tmp_path / "GLM" / "glm-4")
+
+        models = discover_models(tmp_path)
+        assert len(models) == 3
+
+    def test_empty_org_folder_skipped(self, tmp_path):
+        """Test that empty org folders are silently skipped."""
+        self._make_model(tmp_path / "valid-model")
+        (tmp_path / "empty-org").mkdir()
+
+        models = discover_models(tmp_path)
+        assert len(models) == 1
+        assert "valid-model" in models
+
+    def test_org_folder_hidden_children_skipped(self, tmp_path):
+        """Test that hidden subdirs inside org folders are skipped."""
+        org = tmp_path / "mlx-community"
+        self._make_model(org / "llama-3b")
+        self._make_model(org / ".hidden-model")
+
+        models = discover_models(tmp_path)
+        assert len(models) == 1
+        assert "llama-3b" in models
+
+    def test_org_folder_invalid_children_skipped(self, tmp_path):
+        """Test that children without config.json in org folders are skipped."""
+        org = tmp_path / "mlx-community"
+        self._make_model(org / "llama-3b")
+        # Child without config.json
+        no_config = org / "broken-model"
+        no_config.mkdir(parents=True)
+        (no_config / "model.safetensors").write_bytes(b"0" * 1000)
+
+        models = discover_models(tmp_path)
+        assert len(models) == 1
+
+    def test_two_level_model_path_is_correct(self, tmp_path):
+        """Test that model_path points to the actual model dir, not the org."""
+        self._make_model(tmp_path / "mlx-community" / "llama-3b")
+
+        models = discover_models(tmp_path)
+        assert models["llama-3b"].model_path == str(
+            tmp_path / "mlx-community" / "llama-3b"
+        )
