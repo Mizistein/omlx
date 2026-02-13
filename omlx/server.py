@@ -1333,6 +1333,7 @@ async def stream_chat_completion(
     first_token_time = None
     last_output = None
     accumulated_text = ""
+    has_tools = bool(kwargs.get("tools"))
 
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
@@ -1346,7 +1347,9 @@ async def stream_chat_completion(
     )
     yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-    # Stream content
+    # Stream content — buffer when tools are present so we can strip
+    # tool call markup before emitting (prevents clients from seeing
+    # tool calls in both content and structured tool_calls chunks).
     async for output in engine.stream_chat(messages=messages, **kwargs):
         if first_token_time is None and output.new_text:
             first_token_time = time.perf_counter()
@@ -1354,18 +1357,20 @@ async def stream_chat_completion(
         if output.new_text:
             accumulated_text += output.new_text
 
-        chunk = ChatCompletionChunk(
-            id=response_id,
-            model=request.model,
-            choices=[ChatCompletionChunkChoice(
-                delta=ChatCompletionChunkDelta(content=output.new_text if output.new_text else None),
-                finish_reason=None,  # Don't send finish_reason yet — tool calls may follow
-            )],
-        )
-        yield f"data: {chunk.model_dump_json()}\n\n"
+        if not has_tools:
+            chunk = ChatCompletionChunk(
+                id=response_id,
+                model=request.model,
+                choices=[ChatCompletionChunkChoice(
+                    delta=ChatCompletionChunkDelta(content=output.new_text if output.new_text else None),
+                    finish_reason=None,
+                )],
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
 
     # Parse tool calls from accumulated text
     tool_calls = None
+    cleaned_text = accumulated_text
     if last_output and last_output.tool_calls:
         # Harmony model — tool_calls already extracted by parser
         from .api.openai_models import ToolCall, FunctionCall
@@ -1380,18 +1385,30 @@ async def stream_chat_completion(
             )
             for tc in last_output.tool_calls
         ]
-    elif kwargs.get("tools") and accumulated_text:
+        cleaned_text = ""
+    elif has_tools and accumulated_text:
         # Parse from accumulated text using mlx-lm's tool parser
-        _, tool_calls = parse_tool_calls(
+        cleaned_text, tool_calls = parse_tool_calls(
             accumulated_text,
             tokenizer=engine.tokenizer,
             tools=kwargs.get("tools"),
         )
 
+    # When tools were requested, emit buffered content now (cleaned of markup)
+    if has_tools and cleaned_text:
+        content_chunk = ChatCompletionChunk(
+            id=response_id,
+            model=request.model,
+            choices=[ChatCompletionChunkChoice(
+                delta=ChatCompletionChunkDelta(content=cleaned_text),
+                finish_reason=None,
+            )],
+        )
+        yield f"data: {content_chunk.model_dump_json()}\n\n"
+
     # Emit tool call chunks if found
     if tool_calls:
         for i, tc in enumerate(tool_calls):
-            # Send tool call chunk with function name
             tc_chunk = ChatCompletionChunk(
                 id=response_id,
                 model=request.model,
