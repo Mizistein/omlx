@@ -215,7 +215,7 @@ class OMLXAppDelegate(NSObject):
             if resp.status_code == 200:
                 data = resp.json()
                 latest = data["tag_name"].lstrip("v")
-                current = "0.1.0"  # TODO: import from __version__
+                current = "0.1.1"  # TODO: import from __version__
 
                 if self._is_newer_version(latest, current):
                     self._update_info = {
@@ -605,7 +605,7 @@ class OMLXAppDelegate(NSObject):
         alert.setInformativeText_(
             "oMLX - LLM inference,\noptimized for your Mac\n\n"
             "Built with MLX and mlx-lm\n"
-            "Version: 0.1.0"
+            "Version: 0.1.1"
         )
         alert.addButtonWithTitle_("OK")
         alert.runModal()

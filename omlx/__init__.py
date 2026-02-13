@@ -12,7 +12,7 @@ Features:
 - Tiered cache (GPU + paged SSD offloading)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Continuous batching engine (core functionality, no torch required)
 from omlx.request import Request, RequestOutput, RequestStatus, SamplingParams

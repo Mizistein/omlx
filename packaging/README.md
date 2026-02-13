@@ -33,7 +33,7 @@ packaging/
 │   ├── envs/           # Exported environments
 │   └── oMLX.app/       # App bundle
 └── dist/
-    └── oMLX-0.1.0.dmg  # Distribution DMG
+    └── oMLX-0.1.1.dmg  # Distribution DMG
 ```
 
 ## Structure

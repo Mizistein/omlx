@@ -30,7 +30,7 @@ DIST_DIR = SCRIPT_DIR / "dist"
 WHEELS_DIR = SCRIPT_DIR / "_wheels"
 APP_NAME = "oMLX"
 APP_BUNDLE = f"{APP_NAME}.app"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 def clean_all():
