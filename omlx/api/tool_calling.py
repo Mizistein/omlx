@@ -32,6 +32,7 @@ def _parse_xml_tool_calls(text: str) -> Tuple[str, Optional[List[ToolCall]]]:
 
     Handles models that use <tool_call>...</tool_call> XML format, including:
     - GLM format: <tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+    - Qwen/Llama format: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
     - Generic JSON: <tool_call>{"name": ..., "arguments": ...}</tool_call>
 
     Returns:
@@ -60,6 +61,29 @@ def _parse_xml_tool_calls(text: str) -> Tuple[str, Optional[List[ToolCall]]]:
             continue
         except (json.JSONDecodeError, AttributeError):
             pass
+
+        # Qwen/Llama format: <function=name><parameter=key>value</parameter></function>
+        func_match = re.match(r'<function=(\w+)>(.*?)</function>', content, re.DOTALL)
+        if func_match:
+            func_name = func_match.group(1)
+            params_text = func_match.group(2)
+            arguments = {}
+            for pm in re.finditer(r'<parameter=(\w+)>\s*(.*?)\s*</parameter>', params_text, re.DOTALL):
+                key = pm.group(1)
+                val = pm.group(2).strip()
+                try:
+                    arguments[key] = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    arguments[key] = val
+            tool_calls.append(ToolCall(
+                id=f"call_{uuid.uuid4().hex[:8]}",
+                type="function",
+                function=FunctionCall(
+                    name=func_name,
+                    arguments=json.dumps(arguments, ensure_ascii=False),
+                ),
+            ))
+            continue
 
         # GLM XML format: func_name<arg_key>k</arg_key><arg_value>v</arg_value>...
         arg_keys = re.findall(r'<arg_key>(.*?)</arg_key>', content)
