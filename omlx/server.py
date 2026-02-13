@@ -53,7 +53,7 @@ from typing import Optional, Union
 import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, Request as FastAPIRequest
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse as _BaseStreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .api.anthropic_models import (
@@ -135,6 +135,51 @@ from .server_metrics import get_server_metrics, reset_server_metrics
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class StreamingResponse(_BaseStreamingResponse):
+    """StreamingResponse that aborts generation when client disconnects.
+
+    Monitors the ASGI receive channel for http.disconnect and closes
+    the body iterator, propagating GeneratorExit through the engine's
+    stream_generate which calls abort_request().
+    """
+
+    async def __call__(self, scope, receive, send):
+        disconnected = asyncio.Event()
+
+        async def _monitor_disconnect():
+            while True:
+                message = await receive()
+                if message.get("type") == "http.disconnect":
+                    disconnected.set()
+                    return
+
+        monitor_task = asyncio.create_task(_monitor_disconnect())
+
+        inner = self.body_iterator
+
+        async def _disconnect_aware():
+            try:
+                async for chunk in inner:
+                    if disconnected.is_set():
+                        logger.info("Client disconnected, stopping stream")
+                        return
+                    yield chunk
+            finally:
+                if hasattr(inner, "aclose"):
+                    await inner.aclose()
+
+        self.body_iterator = _disconnect_aware()
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
 
 # Security bearer for API key authentication
 security = HTTPBearer(auto_error=False)
@@ -706,16 +751,27 @@ async def _with_sse_keepalive(
     SSE parsers but keep the HTTP connection alive.
     """
     ait = generator.__aiter__()
-    while True:
-        task = asyncio.ensure_future(_safe_anext(ait))
-        while not task.done():
-            done, _ = await asyncio.wait({task}, timeout=interval)
-            if not done:
-                yield ": keep-alive\n\n"
-        result = task.result()
-        if result is _KEEPALIVE_SENTINEL:
-            return
-        yield result
+    task = None
+    try:
+        while True:
+            task = asyncio.ensure_future(_safe_anext(ait))
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=interval)
+                if not done:
+                    yield ": keep-alive\n\n"
+            result = task.result()
+            if result is _KEEPALIVE_SENTINEL:
+                return
+            yield result
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+        if hasattr(ait, 'aclose'):
+            await ait.aclose()
 
 
 async def _run_with_disconnect_guard(
