@@ -1395,10 +1395,17 @@ async def stream_chat_completion(
     request: ChatCompletionRequest,
     **kwargs,
 ) -> AsyncIterator[str]:
-    """Stream chat completion response."""
+    """Stream chat completion response.
+
+    Streams content tokens, then at completion parses tool calls from
+    accumulated text and emits them as structured tool_calls chunks
+    (OpenAI streaming format).
+    """
     start_time = time.perf_counter()
     first_token_time = None
     last_output = None
+    accumulated_text = ""
+    has_tools = bool(kwargs.get("tools"))
 
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
@@ -1412,21 +1419,100 @@ async def stream_chat_completion(
     )
     yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-    # Stream content
+    # Stream content — buffer when tools are present so we can strip
+    # tool call markup before emitting (prevents clients from seeing
+    # tool calls in both content and structured tool_calls chunks).
     async for output in engine.stream_chat(messages=messages, **kwargs):
         if first_token_time is None and output.new_text:
             first_token_time = time.perf_counter()
         last_output = output
+        if output.new_text:
+            accumulated_text += output.new_text
 
-        chunk = ChatCompletionChunk(
+        if not has_tools:
+            chunk = ChatCompletionChunk(
+                id=response_id,
+                model=request.model,
+                choices=[ChatCompletionChunkChoice(
+                    delta=ChatCompletionChunkDelta(content=output.new_text if output.new_text else None),
+                    finish_reason=None,
+                )],
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+
+    # Parse tool calls from accumulated text
+    tool_calls = None
+    cleaned_text = accumulated_text
+    if last_output and last_output.tool_calls:
+        # Harmony model — tool_calls already extracted by parser
+        from .api.openai_models import ToolCall, FunctionCall
+        tool_calls = [
+            ToolCall(
+                id=f"call_{uuid.uuid4().hex[:8]}",
+                type="function",
+                function=FunctionCall(
+                    name=tc["name"],
+                    arguments=tc["arguments"],
+                ),
+            )
+            for tc in last_output.tool_calls
+        ]
+        cleaned_text = ""
+    elif has_tools and accumulated_text:
+        # Parse from accumulated text using mlx-lm's tool parser
+        cleaned_text, tool_calls = parse_tool_calls(
+            accumulated_text,
+            tokenizer=engine.tokenizer,
+            tools=kwargs.get("tools"),
+        )
+
+    # When tools were requested, emit buffered content now (cleaned of markup)
+    if has_tools and cleaned_text:
+        content_chunk = ChatCompletionChunk(
             id=response_id,
             model=request.model,
             choices=[ChatCompletionChunkChoice(
-                delta=ChatCompletionChunkDelta(content=output.new_text if output.new_text else None),
-                finish_reason=output.finish_reason if output.finished else None,
+                delta=ChatCompletionChunkDelta(content=cleaned_text),
+                finish_reason=None,
             )],
         )
-        yield f"data: {chunk.model_dump_json()}\n\n"
+        yield f"data: {content_chunk.model_dump_json()}\n\n"
+
+    # Emit tool call chunks if found
+    if tool_calls:
+        for i, tc in enumerate(tool_calls):
+            tc_chunk = ChatCompletionChunk(
+                id=response_id,
+                model=request.model,
+                choices=[ChatCompletionChunkChoice(
+                    delta=ChatCompletionChunkDelta(
+                        tool_calls=[{
+                            "index": i,
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }],
+                    ),
+                )],
+            )
+            yield f"data: {tc_chunk.model_dump_json()}\n\n"
+
+    # Final chunk with finish_reason
+    finish_reason = "tool_calls" if tool_calls else (
+        last_output.finish_reason if last_output else "stop"
+    )
+    final_chunk = ChatCompletionChunk(
+        id=response_id,
+        model=request.model,
+        choices=[ChatCompletionChunkChoice(
+            delta=ChatCompletionChunkDelta(),
+            finish_reason=finish_reason,
+        )],
+    )
+    yield f"data: {final_chunk.model_dump_json()}\n\n"
 
     # Record metrics
     if last_output and last_output.finished:

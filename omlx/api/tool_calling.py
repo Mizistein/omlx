@@ -26,16 +26,106 @@ from jsonschema import validate, ValidationError
 from .openai_models import FunctionCall, ResponseFormat, ToolCall, ToolDefinition
 
 
+def _parse_xml_tool_calls(text: str) -> Tuple[str, Optional[List[ToolCall]]]:
+    """
+    Fallback parser for XML-based tool call formats.
+
+    Handles models that use <tool_call>...</tool_call> XML format, including:
+    - GLM format: <tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+    - Qwen/Llama format: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+    - Generic JSON: <tool_call>{"name": ..., "arguments": ...}</tool_call>
+
+    Returns:
+        Tuple of (cleaned_text, tool_calls or None)
+    """
+    tool_calls = []
+    pattern = r'<tool_call>(.*?)</tool_call>'
+    matches = re.findall(pattern, text, re.DOTALL)
+
+    for match in matches:
+        content = match.strip()
+        try:
+            # Try JSON format first: {"name": "func", "arguments": {...}}
+            parsed = json.loads(content)
+            name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            tool_calls.append(ToolCall(
+                id=f"call_{uuid.uuid4().hex[:8]}",
+                type="function",
+                function=FunctionCall(
+                    name=name,
+                    arguments=json.dumps(arguments, ensure_ascii=False)
+                        if isinstance(arguments, dict) else str(arguments),
+                ),
+            ))
+            continue
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        # Qwen/Llama format: <function=name><parameter=key>value</parameter></function>
+        func_match = re.match(r'<function=(\w+)>(.*?)</function>', content, re.DOTALL)
+        if func_match:
+            func_name = func_match.group(1)
+            params_text = func_match.group(2)
+            arguments = {}
+            for pm in re.finditer(r'<parameter=(\w+)>\s*(.*?)\s*</parameter>', params_text, re.DOTALL):
+                key = pm.group(1)
+                val = pm.group(2).strip()
+                try:
+                    arguments[key] = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    arguments[key] = val
+            tool_calls.append(ToolCall(
+                id=f"call_{uuid.uuid4().hex[:8]}",
+                type="function",
+                function=FunctionCall(
+                    name=func_name,
+                    arguments=json.dumps(arguments, ensure_ascii=False),
+                ),
+            ))
+            continue
+
+        # GLM XML format: func_name<arg_key>k</arg_key><arg_value>v</arg_value>...
+        arg_keys = re.findall(r'<arg_key>(.*?)</arg_key>', content)
+        arg_values = re.findall(r'<arg_value>(.*?)</arg_value>', content, re.DOTALL)
+        if arg_keys:
+            # Function name is the text before the first <arg_key>
+            name_match = re.match(r'^(.*?)<arg_key>', content, re.DOTALL)
+            func_name = name_match.group(1).strip() if name_match else content.split('<')[0].strip()
+            arguments = {}
+            for k, v in zip(arg_keys, arg_values):
+                # Try to parse JSON values (arrays, objects, numbers, booleans)
+                try:
+                    arguments[k] = json.loads(v)
+                except (json.JSONDecodeError, ValueError):
+                    arguments[k] = v
+            tool_calls.append(ToolCall(
+                id=f"call_{uuid.uuid4().hex[:8]}",
+                type="function",
+                function=FunctionCall(
+                    name=func_name,
+                    arguments=json.dumps(arguments, ensure_ascii=False),
+                ),
+            ))
+
+    if not tool_calls:
+        return text, None
+
+    # Remove tool call tags from text
+    cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', text, flags=re.DOTALL).strip()
+    return cleaned, tool_calls
+
+
 def parse_tool_calls(
     text: str,
     tokenizer: Any,
     tools: Optional[List] = None,
 ) -> Tuple[str, Optional[List[ToolCall]]]:
     """
-    Parse tool calls from model output using mlx-lm's TokenizerWrapper.
+    Parse tool calls from model output.
 
-    Uses the model's specific tool parser for accurate extraction and
-    type conversion based on JSON Schema definitions.
+    Uses mlx-lm's TokenizerWrapper tool parser if available, otherwise
+    falls back to generic XML tool call parsing for models like GLM.
 
     Args:
         text: Raw model output text
@@ -57,56 +147,51 @@ def parse_tool_calls(
         flags=re.DOTALL
     ).strip()
 
-    # Check if tokenizer supports tool calling
-    if not getattr(tokenizer, 'has_tool_calling', False):
-        return cleaned_text, None
+    # Try mlx-lm's native tool parser first
+    if getattr(tokenizer, 'has_tool_calling', False):
+        tool_call_start = tokenizer.tool_call_start
+        tool_call_end = tokenizer.tool_call_end
+        tool_parser = tokenizer.tool_parser
 
-    tool_call_start = tokenizer.tool_call_start
-    tool_call_end = tokenizer.tool_call_end
-    tool_parser = tokenizer.tool_parser
+        if all([tool_call_start, tool_call_end, tool_parser]):
+            tool_calls = []
+            start_escaped = re.escape(tool_call_start)
+            end_escaped = re.escape(tool_call_end)
+            pattern = rf'{start_escaped}(.*?){end_escaped}'
 
-    if not all([tool_call_start, tool_call_end, tool_parser]):
-        return cleaned_text, None
+            matches = re.findall(pattern, text, re.DOTALL)
 
-    tool_calls = []
+            for match in matches:
+                try:
+                    parsed = tool_parser(match.strip(), tools)
+                    name = parsed.get('name', '')
+                    arguments = parsed.get('arguments', {})
+                    tool_calls.append(ToolCall(
+                        id=f"call_{uuid.uuid4().hex[:8]}",
+                        type="function",
+                        function=FunctionCall(
+                            name=name,
+                            arguments=json.dumps(arguments, ensure_ascii=False)
+                                if isinstance(arguments, dict) else str(arguments)
+                        )
+                    ))
+                except (ValueError, json.JSONDecodeError, AttributeError, KeyError):
+                    continue
 
-    # Build regex pattern to extract content between markers
-    start_escaped = re.escape(tool_call_start)
-    end_escaped = re.escape(tool_call_end)
-    pattern = rf'{start_escaped}(.*?){end_escaped}'
+            if tool_calls:
+                cleaned_text = re.sub(
+                    rf'{start_escaped}.*?{end_escaped}',
+                    '',
+                    cleaned_text,
+                    flags=re.DOTALL
+                ).strip()
+                return cleaned_text, tool_calls
 
-    matches = re.findall(pattern, text, re.DOTALL)
+    # Fallback: parse XML <tool_call> tags (GLM, generic formats)
+    if '<tool_call>' in cleaned_text:
+        return _parse_xml_tool_calls(cleaned_text)
 
-    for match in matches:
-        try:
-            # Use mlx-lm's tool parser (includes type conversion)
-            parsed = tool_parser(match.strip(), tools)
-
-            name = parsed.get('name', '')
-            arguments = parsed.get('arguments', {})
-
-            tool_calls.append(ToolCall(
-                id=f"call_{uuid.uuid4().hex[:8]}",
-                type="function",
-                function=FunctionCall(
-                    name=name,
-                    arguments=json.dumps(arguments, ensure_ascii=False)
-                        if isinstance(arguments, dict) else str(arguments)
-                )
-            ))
-        except (ValueError, json.JSONDecodeError, AttributeError, KeyError):
-            continue
-
-    # Remove tool call markers from cleaned text
-    if matches:
-        cleaned_text = re.sub(
-            rf'{start_escaped}.*?{end_escaped}',
-            '',
-            cleaned_text,
-            flags=re.DOTALL
-        ).strip()
-
-    return cleaned_text, tool_calls if tool_calls else None
+    return cleaned_text, None
 
 
 def convert_tools_for_template(
