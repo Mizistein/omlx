@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omlx"
+version = "0.1.0"
+description = "High-performance LLM inference server for Apple Silicon"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "omlx contributors"}
+]
+keywords = ["llm", "mlx", "apple-silicon", "vllm", "inference", "transformers"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "mlx>=0.29.2",
+    # mlx-lm from latest commit (bcf6306)
+    "mlx-lm @ git+https://github.com/ml-explore/mlx-lm@bcf630614ffb5624bcb19870a7bcb0d847e6e98f",
+    # mlx-embeddings from latest commit (88522e2)
+    "mlx-embeddings @ git+https://github.com/Blaizzy/mlx-embeddings@88522e288c0142170a5a44fd93c184d8ed777371",
+    # transformers version aligned with mlx-lm requirement
+    "transformers>=5.0.0",
+    "tokenizers>=0.19.0",
+    "huggingface-hub>=0.23.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.66.0",
+    "pyyaml>=6.0",
+    "itsdangerous>=2.0",
+    "jinja2>=3.0",
+    "sentencepiece",
+    "protobuf",
+    "requests>=2.28.0",
+    "tabulate>=0.9.0",
+    # Resource monitoring
+    "psutil>=5.9.0",
+    # Server
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    # MCP (Model Context Protocol) support
+    "mcp>=1.0.0",
+    # JSON Schema validation for structured output
+    "jsonschema>=4.0.0",
+    # Harmony format parser for gpt-oss models
+    "openai-harmony",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+[project.urls]
+Homepage = "https://github.com/jundot/omlx"
+Documentation = "https://github.com/jundot/omlx#readme"
+Repository = "https://github.com/jundot/omlx"
+
+[project.scripts]
+omlx = "omlx.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["omlx*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312", "py313"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501", "B905"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

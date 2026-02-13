@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for API key authentication."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+# Note: These tests need a mock server setup since the actual server requires models
+
+
+class TestVerifyApiKey:
+    """Tests for verify_api_key function."""
+
+    def test_verify_api_key_no_auth_required(self):
+        """Test that no auth is required when api_key is None."""
+        from omlx.server import verify_api_key, _server_state
+        import asyncio
+
+        original_key = _server_state.api_key
+        _server_state.api_key = None
+
+        try:
+            # Should return True without any credentials
+            result = asyncio.run(verify_api_key(credentials=None))
+            assert result is True
+        finally:
+            _server_state.api_key = original_key
+
+    def test_verify_api_key_missing_credentials(self):
+        """Test that missing credentials raises 401 when api_key is set."""
+        from omlx.server import verify_api_key, _server_state
+        from fastapi import HTTPException
+        import asyncio
+
+        original_key = _server_state.api_key
+        _server_state.api_key = "test-key"
+
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(verify_api_key(credentials=None))
+            assert exc_info.value.status_code == 401
+            assert "required" in exc_info.value.detail.lower()
+        finally:
+            _server_state.api_key = original_key
+
+    def test_verify_api_key_invalid_key(self):
+        """Test that invalid key raises 401."""
+        from omlx.server import verify_api_key, _server_state
+        from fastapi import HTTPException
+        from fastapi.security import HTTPAuthorizationCredentials
+        import asyncio
+
+        original_key = _server_state.api_key
+        _server_state.api_key = "correct-key"
+
+        try:
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="wrong-key")
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(verify_api_key(credentials=credentials))
+            assert exc_info.value.status_code == 401
+            assert "invalid" in exc_info.value.detail.lower()
+        finally:
+            _server_state.api_key = original_key
+
+    def test_verify_api_key_valid_key(self):
+        """Test that valid key passes."""
+        from omlx.server import verify_api_key, _server_state
+        from fastapi.security import HTTPAuthorizationCredentials
+        import asyncio
+
+        original_key = _server_state.api_key
+        _server_state.api_key = "correct-key"
+
+        try:
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="correct-key")
+            result = asyncio.run(verify_api_key(credentials=credentials))
+            assert result is True
+        finally:
+            _server_state.api_key = original_key
+
+
+class TestAdminAuth:
+    """Tests for admin authentication functions."""
+
+    def test_create_session_token(self):
+        """Test session token creation."""
+        from omlx.admin.auth import create_session_token
+
+        token = create_session_token()
+        assert token is not None
+        assert isinstance(token, str)
+        assert len(token) > 0
+
+    def test_verify_session_token_valid(self):
+        """Test valid session token verification."""
+        from omlx.admin.auth import create_session_token, verify_session_token
+
+        token = create_session_token()
+        assert verify_session_token(token) is True
+
+    def test_verify_session_token_invalid(self):
+        """Test invalid session token verification."""
+        from omlx.admin.auth import verify_session_token
+
+        assert verify_session_token("invalid-token") is False
+
+    def test_verify_session_token_expired(self):
+        """Test expired session token verification."""
+        from omlx.admin.auth import create_session_token, verify_session_token
+        import time
+
+        token = create_session_token()
+        # Wait a moment and verify with very short max_age
+        time.sleep(0.1)
+        # With max_age=0, token should be expired after any delay
+        # Note: itsdangerous rounds to nearest second, so we use a small delay
+        assert verify_session_token(token, max_age=-1) is False
+
+    def test_verify_api_key_constant_time(self):
+        """Test that API key comparison uses constant time."""
+        from omlx.admin.auth import verify_api_key
+        import secrets
+
+        server_key = "test-api-key-12345"
+
+        # Valid key
+        assert verify_api_key("test-api-key-12345", server_key) is True
+
+        # Invalid key
+        assert verify_api_key("wrong-key", server_key) is False
+
+        # Empty key
+        assert verify_api_key("", server_key) is False

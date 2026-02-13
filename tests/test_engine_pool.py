@@ -1,0 +1,412 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Tests for EnginePool functionality."""
+
+import asyncio
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from omlx.engine_pool import EngineEntry, EnginePool
+from omlx.exceptions import (
+    InsufficientMemoryError,
+    ModelLoadingError,
+    ModelNotFoundError,
+    ModelTooLargeError,
+)
+
+
+@pytest.fixture
+def mock_model_dir(tmp_path):
+    """Create a mock model directory with multiple models."""
+    # Create model-a (1GB)
+    model_a = tmp_path / "model-a"
+    model_a.mkdir()
+    (model_a / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (model_a / "model.safetensors").write_bytes(b"0" * (1024 * 1024 * 1024))  # 1GB
+
+    # Create model-b (2GB)
+    model_b = tmp_path / "model-b"
+    model_b.mkdir()
+    (model_b / "config.json").write_text(json.dumps({"model_type": "qwen"}))
+    (model_b / "model.safetensors").write_bytes(b"0" * (2 * 1024 * 1024 * 1024))  # 2GB
+
+    # Create model-c (500MB MLLM)
+    model_c = tmp_path / "model-c"
+    model_c.mkdir()
+    (model_c / "config.json").write_text(json.dumps({"vision_config": {}}))
+    (model_c / "model.safetensors").write_bytes(b"0" * (512 * 1024 * 1024))  # 500MB
+
+    return tmp_path
+
+
+@pytest.fixture
+def small_mock_model_dir(tmp_path):
+    """Create a mock model directory with small models for fast tests."""
+    # Create model-a (1KB)
+    model_a = tmp_path / "model-a"
+    model_a.mkdir()
+    (model_a / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (model_a / "model.safetensors").write_bytes(b"0" * 1024)
+
+    # Create model-b (2KB)
+    model_b = tmp_path / "model-b"
+    model_b.mkdir()
+    (model_b / "config.json").write_text(json.dumps({"model_type": "qwen"}))
+    (model_b / "model.safetensors").write_bytes(b"0" * 2048)
+
+    return tmp_path
+
+
+class TestEnginePoolInit:
+    """Tests for EnginePool initialization."""
+
+    def test_init_default_config(self):
+        """Test initialization with default config."""
+        pool = EnginePool(max_model_memory=32 * 1024**3)
+        assert pool.max_model_memory == 32 * 1024**3
+        assert pool.current_model_memory == 0
+        assert pool.model_count == 0
+        assert pool.loaded_model_count == 0
+
+    def test_discover_models(self, small_mock_model_dir):
+        """Test model discovery."""
+        pool = EnginePool(max_model_memory=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir))
+
+        assert pool.model_count == 2
+        assert "model-a" in pool.get_model_ids()
+        assert "model-b" in pool.get_model_ids()
+
+    def test_discover_models_with_pinned(self, small_mock_model_dir):
+        """Test model discovery with pinned models."""
+        pool = EnginePool(max_model_memory=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir), pinned_models=["model-a"])
+
+        entry = pool.get_entry("model-a")
+        assert entry is not None
+        assert entry.is_pinned is True
+
+        entry_b = pool.get_entry("model-b")
+        assert entry_b is not None
+        assert entry_b.is_pinned is False
+
+
+class TestEnginePoolErrors:
+    """Tests for EnginePool error handling."""
+
+    def test_model_not_found_error(self, small_mock_model_dir):
+        """Test ModelNotFoundError when model doesn't exist."""
+        pool = EnginePool(max_model_memory=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir))
+
+        with pytest.raises(ModelNotFoundError) as exc_info:
+            asyncio.run(pool.get_engine("nonexistent"))
+
+        assert exc_info.value.model_id == "nonexistent"
+        assert "model-a" in exc_info.value.available_models
+
+    def test_model_too_large_error(self, small_mock_model_dir):
+        """Test ModelTooLargeError when model exceeds memory limit."""
+        # Set very small memory limit
+        pool = EnginePool(max_model_memory=100)  # 100 bytes
+        pool.discover_models(str(small_mock_model_dir))
+
+        with pytest.raises(ModelTooLargeError) as exc_info:
+            asyncio.run(pool.get_engine("model-a"))
+
+        assert exc_info.value.model_id == "model-a"
+        assert exc_info.value.max_memory == 100
+
+
+class TestEnginePoolStatus:
+    """Tests for EnginePool status reporting."""
+
+    def test_get_status(self, small_mock_model_dir):
+        """Test get_status returns correct information."""
+        pool = EnginePool(max_model_memory=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir), pinned_models=["model-a"])
+
+        status = pool.get_status()
+
+        assert status["max_model_memory"] == 10 * 1024**3
+        assert status["current_model_memory"] == 0
+        assert status["model_count"] == 2
+        assert status["loaded_count"] == 0
+        assert len(status["models"]) == 2
+
+        # Check model details
+        model_ids = {m["id"] for m in status["models"]}
+        assert model_ids == {"model-a", "model-b"}
+
+        # Check pinned status
+        model_a_status = next(m for m in status["models"] if m["id"] == "model-a")
+        assert model_a_status["pinned"] is True
+        assert model_a_status["loaded"] is False
+
+    def test_get_model_ids(self, small_mock_model_dir):
+        """Test get_model_ids returns all model IDs."""
+        pool = EnginePool(max_model_memory=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir))
+
+        ids = pool.get_model_ids()
+        assert set(ids) == {"model-a", "model-b"}
+
+    def test_get_loaded_model_ids_empty(self, small_mock_model_dir):
+        """Test get_loaded_model_ids when no models loaded."""
+        pool = EnginePool(max_model_memory=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir))
+
+        assert pool.get_loaded_model_ids() == []
+
+
+class TestEngineEntry:
+    """Tests for EngineEntry dataclass."""
+
+    def test_entry_defaults(self):
+        """Test EngineEntry default values."""
+        entry = EngineEntry(
+            model_id="test",
+            model_path="/path/to/model",
+            model_type="llm",
+            engine_type="batched",
+            estimated_size=1000,
+        )
+
+        assert entry.engine is None
+        assert entry.last_access == 0.0
+        assert entry.is_loading is False
+        assert entry.is_pinned is False
+
+    def test_entry_with_values(self):
+        """Test EngineEntry with custom values."""
+        entry = EngineEntry(
+            model_id="test",
+            model_path="/path/to/model",
+            model_type="embedding",
+            engine_type="embedding",
+            estimated_size=2000,
+            is_pinned=True,
+        )
+
+        assert entry.model_type == "embedding"
+        assert entry.engine_type == "embedding"
+        assert entry.is_pinned is True
+
+
+class TestEnginePoolLRU:
+    """Tests for LRU eviction logic."""
+
+    @pytest.fixture
+    def pool_with_entries(self, small_mock_model_dir):
+        """Create pool with mock entries for LRU testing."""
+        pool = EnginePool(max_model_memory=5000)  # 5KB limit
+        pool.discover_models(str(small_mock_model_dir))
+        return pool
+
+    def test_find_lru_victim_no_loaded(self, pool_with_entries):
+        """Test finding LRU victim when no models loaded."""
+        victim = pool_with_entries._find_lru_victim()
+        assert victim is None
+
+    def test_find_lru_victim_all_pinned(self, pool_with_entries):
+        """Test finding LRU victim when all loaded models are pinned."""
+        # Mark both as pinned
+        pool_with_entries._entries["model-a"].is_pinned = True
+        pool_with_entries._entries["model-b"].is_pinned = True
+
+        # Simulate loaded state
+        pool_with_entries._entries["model-a"].engine = MagicMock()
+        pool_with_entries._entries["model-a"].last_access = 100
+
+        victim = pool_with_entries._find_lru_victim()
+        assert victim is None
+
+    def test_find_lru_victim_oldest_first(self, pool_with_entries):
+        """Test that oldest (lowest last_access) is selected."""
+        # Simulate loaded state with different access times
+        pool_with_entries._entries["model-a"].engine = MagicMock()
+        pool_with_entries._entries["model-a"].last_access = 100  # Older
+
+        pool_with_entries._entries["model-b"].engine = MagicMock()
+        pool_with_entries._entries["model-b"].last_access = 200  # Newer
+
+        victim = pool_with_entries._find_lru_victim()
+        assert victim == "model-a"
+
+    def test_pinned_model_skipped_for_eviction(self, pool_with_entries):
+        """Test that pinned models are skipped during eviction."""
+        # model-a is pinned and older
+        pool_with_entries._entries["model-a"].is_pinned = True
+        pool_with_entries._entries["model-a"].engine = MagicMock()
+        pool_with_entries._entries["model-a"].last_access = 50
+
+        # model-b is not pinned and newer
+        pool_with_entries._entries["model-b"].engine = MagicMock()
+        pool_with_entries._entries["model-b"].last_access = 200
+
+        victim = pool_with_entries._find_lru_victim()
+        # model-a is skipped (pinned), model-b is selected
+        assert victim == "model-b"
+
+
+class TestEnginePoolAsync:
+    """Async tests for EnginePool (mocked)."""
+
+    @pytest.fixture
+    def pool_with_mock_engines(self, small_mock_model_dir):
+        """Create pool with mocked engine loading."""
+        pool = EnginePool(max_model_memory=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir))
+        return pool
+
+    @pytest.mark.asyncio
+    async def test_get_engine_loads_model(self, pool_with_mock_engines):
+        """Test that get_engine loads the model."""
+        pool = pool_with_mock_engines
+
+        # Mock the engine loading
+        mock_engine = MagicMock()
+        mock_engine.start = AsyncMock()
+        mock_engine.stop = AsyncMock()
+
+        with patch("omlx.engine_pool.BatchedEngine", return_value=mock_engine):
+            engine = await pool.get_engine("model-a")
+
+        assert engine == mock_engine
+        mock_engine.start.assert_called_once()
+        assert pool.loaded_model_count == 1
+        assert pool.current_model_memory > 0
+
+    @pytest.mark.asyncio
+    async def test_get_engine_returns_cached(self, pool_with_mock_engines):
+        """Test that get_engine returns cached engine on second call."""
+        pool = pool_with_mock_engines
+
+        mock_engine = MagicMock()
+        mock_engine.start = AsyncMock()
+
+        with patch("omlx.engine_pool.BatchedEngine", return_value=mock_engine):
+            engine1 = await pool.get_engine("model-a")
+            engine2 = await pool.get_engine("model-a")
+
+        assert engine1 is engine2
+        # start() should only be called once
+        assert mock_engine.start.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unload_engine(self, pool_with_mock_engines):
+        """Test unloading an engine."""
+        pool = pool_with_mock_engines
+
+        mock_engine = MagicMock()
+        mock_engine.start = AsyncMock()
+        mock_engine.stop = AsyncMock()
+
+        with patch("omlx.engine_pool.BatchedEngine", return_value=mock_engine):
+            await pool.get_engine("model-a")
+            initial_memory = pool.current_model_memory
+
+            await pool._unload_engine("model-a")
+
+        mock_engine.stop.assert_called_once()
+        assert pool.current_model_memory < initial_memory
+        assert pool._entries["model-a"].engine is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_unloads_all(self, pool_with_mock_engines):
+        """Test that shutdown unloads all engines."""
+        pool = pool_with_mock_engines
+
+        mock_engine_a = MagicMock()
+        mock_engine_a.start = AsyncMock()
+        mock_engine_a.stop = AsyncMock()
+
+        mock_engine_b = MagicMock()
+        mock_engine_b.start = AsyncMock()
+        mock_engine_b.stop = AsyncMock()
+
+        engines = [mock_engine_a, mock_engine_b]
+        engine_idx = [0]
+
+        def create_engine(*args, **kwargs):
+            engine = engines[engine_idx[0]]
+            engine_idx[0] += 1
+            return engine
+
+        with patch("omlx.engine_pool.BatchedEngine", side_effect=create_engine):
+            await pool.get_engine("model-a")
+            await pool.get_engine("model-b")
+
+            await pool.shutdown()
+
+        mock_engine_a.stop.assert_called_once()
+        mock_engine_b.stop.assert_called_once()
+        assert pool.loaded_model_count == 0
+
+
+class TestEnginePoolEviction:
+    """Tests for memory-based eviction."""
+
+    @pytest.fixture
+    def tight_memory_pool(self, small_mock_model_dir):
+        """Create pool with tight memory limit."""
+        # Model-a is ~1KB (1024 bytes + overhead ~1.1KB)
+        # Model-b is ~2KB (2048 bytes + overhead ~2.1KB)
+        # Set limit to allow each model individually but not both together
+        pool = EnginePool(max_model_memory=2500)  # Allows each but not both
+        pool.discover_models(str(small_mock_model_dir))
+        return pool
+
+    @pytest.mark.asyncio
+    async def test_eviction_before_load(self, tight_memory_pool):
+        """Test that eviction happens before loading new model."""
+        pool = tight_memory_pool
+
+        mock_engine_a = MagicMock()
+        mock_engine_a.start = AsyncMock()
+        mock_engine_a.stop = AsyncMock()
+
+        mock_engine_b = MagicMock()
+        mock_engine_b.start = AsyncMock()
+
+        call_count = [0]
+
+        def create_engine(*args, **kwargs):
+            call_count[0] += 1
+            if "model-a" in str(kwargs.get("model_name", args[0] if args else "")):
+                return mock_engine_a
+            return mock_engine_b
+
+        with patch("omlx.engine_pool.BatchedEngine", side_effect=create_engine):
+            # Load model-a first
+            await pool.get_engine("model-a")
+            assert pool.loaded_model_count == 1
+
+            # Load model-b - should evict model-a first
+            await pool.get_engine("model-b")
+
+        # model-a should have been unloaded
+        mock_engine_a.stop.assert_called_once()
+        assert pool._entries["model-a"].engine is None
+        assert pool._entries["model-b"].engine is not None
+
+    @pytest.mark.asyncio
+    async def test_insufficient_memory_all_pinned(self, tight_memory_pool):
+        """Test InsufficientMemoryError when all models are pinned."""
+        pool = tight_memory_pool
+
+        # Pin model-a
+        pool._entries["model-a"].is_pinned = True
+
+        mock_engine = MagicMock()
+        mock_engine.start = AsyncMock()
+
+        with patch("omlx.engine_pool.BatchedEngine", return_value=mock_engine):
+            # Load pinned model-a
+            await pool.get_engine("model-a")
+
+            # Try to load model-b - should fail (can't evict pinned model-a)
+            with pytest.raises(InsufficientMemoryError):
+                await pool.get_engine("model-b")

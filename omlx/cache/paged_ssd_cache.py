@@ -1,0 +1,1210 @@
+# SPDX-License-Identifier: Apache-2.0
+"""
+Paged SSD Cache Manager for oMLX KV cache.
+
+This module implements SSD-based storage for paged KV cache blocks,
+enabling larger effective cache sizes than GPU memory allows.
+
+Key features:
+- Block-level safetensors serialization (compatible with mlx-lm)
+- Hash-based subdirectory structure for scalability
+- LRU-based paged SSD cache size management
+- Startup scan to reuse existing cache files
+
+Reference: mlx-lm/mlx_lm/models/cache.py (save_prompt_cache, load_prompt_cache)
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import shutil
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from omlx.utils.formatting import format_bytes
+from .interface import CacheManager
+from .stats import BaseCacheStats, PagedSSDCacheStats
+
+logger = logging.getLogger(__name__)
+
+# Check for MLX
+try:
+    import mlx.core as mx
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    HAS_MLX = True
+except ImportError:
+    HAS_MLX = False
+    mx = None
+
+
+def parse_size(size_str: str) -> int:
+    """
+    Parse a human-readable size string to bytes.
+
+    Args:
+        size_str: Size string like "100GB", "50MB", "1TB"
+
+    Returns:
+        Size in bytes.
+    """
+    size_str = size_str.strip().upper()
+
+    units = {
+        "B": 1,
+        "KB": 1024,
+        "MB": 1024**2,
+        "GB": 1024**3,
+        "TB": 1024**4,
+    }
+
+    for unit, multiplier in units.items():
+        if size_str.endswith(unit):
+            try:
+                value = float(size_str[: -len(unit)])
+                return int(value * multiplier)
+            except ValueError:
+                pass
+
+    # Try parsing as plain number (bytes)
+    try:
+        return int(size_str)
+    except ValueError:
+        raise ValueError(f"Invalid size string: {size_str}")
+
+
+@dataclass
+class PagedSSDBlockMetadata:
+    """
+    Metadata for a block stored on SSD.
+
+    Attributes:
+        block_hash: Content hash (SHA256) for identification
+        file_path: Full path to safetensors file
+        file_size: Size in bytes
+        token_count: Number of tokens in this block
+        created_at: Timestamp when saved
+        last_access: Last access time for LRU tracking
+        num_layers: Number of model layers
+        model_name: Model name for cache isolation between different models
+        layer_cache_types: Per-layer cache type names (e.g., ["KVCache", "ArraysCache"])
+        layer_meta_states: Per-layer meta_state tuples for reconstruction
+    """
+
+    block_hash: bytes
+    file_path: Path
+    file_size: int
+    token_count: int
+    created_at: float
+    last_access: float
+    num_layers: int
+    model_name: str = ""
+    layer_cache_types: Optional[List[str]] = None
+    layer_meta_states: Optional[List[Tuple]] = None
+
+    def touch(self) -> None:
+        """Update last access time."""
+        self.last_access = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        result = {
+            "block_hash": self.block_hash.hex(),
+            "file_path": str(self.file_path),
+            "file_size": self.file_size,
+            "token_count": self.token_count,
+            "created_at": self.created_at,
+            "last_access": self.last_access,
+            "num_layers": self.num_layers,
+            "model_name": self.model_name,
+        }
+        if self.layer_cache_types:
+            result["layer_cache_types"] = self.layer_cache_types
+        if self.layer_meta_states:
+            # Convert tuples to lists for JSON serialization
+            result["layer_meta_states"] = [list(m) for m in self.layer_meta_states]
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PagedSSDBlockMetadata":
+        """Create from dictionary."""
+        # Parse layer_meta_states back to tuples
+        layer_meta_states = None
+        if "layer_meta_states" in data and data["layer_meta_states"]:
+            layer_meta_states = [tuple(m) for m in data["layer_meta_states"]]
+
+        return cls(
+            block_hash=bytes.fromhex(data["block_hash"]),
+            file_path=Path(data["file_path"]),
+            file_size=data["file_size"],
+            token_count=data["token_count"],
+            created_at=data["created_at"],
+            last_access=data["last_access"],
+            num_layers=data["num_layers"],
+            model_name=data.get("model_name", ""),
+            layer_cache_types=data.get("layer_cache_types"),
+            layer_meta_states=layer_meta_states,
+        )
+
+
+class PagedSSDCacheIndex:
+    """
+    In-memory index of SSD cache files.
+
+    Provides O(1) lookup by block_hash and LRU tracking for size management.
+    Thread-safe for concurrent access.
+    """
+
+    def __init__(self, max_size_bytes: int):
+        """
+        Initialize the SSD cache index.
+
+        Args:
+            max_size_bytes: Maximum total size of SSD cache files.
+        """
+        self._index: Dict[bytes, PagedSSDBlockMetadata] = {}
+        self._lru: OrderedDict[bytes, float] = OrderedDict()
+        self._total_size: int = 0
+        self._max_size: int = max_size_bytes
+        self._lock = threading.RLock()
+
+    def add(self, metadata: PagedSSDBlockMetadata) -> None:
+        """
+        Add a block to the index.
+
+        Args:
+            metadata: Block metadata to add.
+        """
+        with self._lock:
+            # Remove existing entry if present
+            if metadata.block_hash in self._index:
+                old_meta = self._index[metadata.block_hash]
+                self._total_size -= old_meta.file_size
+                del self._lru[metadata.block_hash]
+
+            self._index[metadata.block_hash] = metadata
+            self._lru[metadata.block_hash] = metadata.last_access
+            self._total_size += metadata.file_size
+
+    def get(self, block_hash: bytes) -> Optional[PagedSSDBlockMetadata]:
+        """
+        Get block metadata by hash.
+
+        Args:
+            block_hash: Block content hash.
+
+        Returns:
+            PagedSSDBlockMetadata if found, None otherwise.
+        """
+        with self._lock:
+            return self._index.get(block_hash)
+
+    def remove(self, block_hash: bytes) -> Optional[PagedSSDBlockMetadata]:
+        """
+        Remove a block from the index.
+
+        Args:
+            block_hash: Block content hash.
+
+        Returns:
+            Removed metadata if found, None otherwise.
+        """
+        with self._lock:
+            if block_hash not in self._index:
+                return None
+
+            metadata = self._index.pop(block_hash)
+            del self._lru[block_hash]
+            self._total_size -= metadata.file_size
+            return metadata
+
+    def touch(self, block_hash: bytes) -> None:
+        """
+        Update last access time (move to end of LRU).
+
+        Args:
+            block_hash: Block content hash.
+        """
+        with self._lock:
+            if block_hash in self._index:
+                self._index[block_hash].touch()
+                self._lru.move_to_end(block_hash)
+                self._lru[block_hash] = self._index[block_hash].last_access
+
+    def get_lru_entries(self, count: int) -> List[PagedSSDBlockMetadata]:
+        """
+        Get least recently used entries.
+
+        Args:
+            count: Maximum number of entries to return.
+
+        Returns:
+            List of LRU metadata entries.
+        """
+        with self._lock:
+            result = []
+            for block_hash in list(self._lru.keys())[:count]:
+                if block_hash in self._index:
+                    result.append(self._index[block_hash])
+            return result
+
+    def evict_until_size(self, target_size: int) -> List[PagedSSDBlockMetadata]:
+        """
+        Evict LRU entries until total size is below target.
+
+        Args:
+            target_size: Target total size in bytes.
+
+        Returns:
+            List of evicted metadata (files need to be deleted by caller).
+        """
+        with self._lock:
+            evicted = []
+            while self._total_size > target_size and self._lru:
+                # Get LRU entry (first in OrderedDict)
+                block_hash = next(iter(self._lru))
+                metadata = self.remove(block_hash)
+                if metadata:
+                    evicted.append(metadata)
+            return evicted
+
+    def contains(self, block_hash: bytes) -> bool:
+        """Check if block exists in index."""
+        with self._lock:
+            return block_hash in self._index
+
+    @property
+    def total_size(self) -> int:
+        """Get total size of indexed files."""
+        with self._lock:
+            return self._total_size
+
+    @property
+    def max_size(self) -> int:
+        """Get maximum allowed size."""
+        return self._max_size
+
+    @property
+    def count(self) -> int:
+        """Get number of indexed blocks."""
+        with self._lock:
+            return len(self._index)
+
+    def get_all_hashes(self) -> List[bytes]:
+        """Get all indexed block hashes."""
+        with self._lock:
+            return list(self._index.keys())
+
+
+class PagedSSDCacheManager(CacheManager):
+    """
+    Manages SSD storage for KV cache blocks.
+
+    Features:
+    - Block-level safetensors serialization
+    - Hash-based subdirectory structure (single level: /a/, /b/, etc.)
+    - LRU-based SSD cache size management
+
+    Implements the CacheManager ABC interface for consistency with other
+    cache implementations in oMLX.
+
+    Example:
+        >>> manager = PagedSSDCacheManager(
+        ...     cache_dir=Path("/tmp/ssd_cache"),
+        ...     max_size_bytes=100 * 1024**3,  # 100GB
+        ... )
+        >>> manager.save_block(block_hash, cache_data, token_count=64)
+        >>> loaded = manager.load_block(block_hash)
+    """
+
+    # Subdirectory prefixes (hash first char)
+    SUBDIR_CHARS = "0123456789abcdef"
+
+    def __init__(
+        self,
+        cache_dir: Path,
+        max_size_bytes: int,
+    ):
+        """
+        Initialize the SSD cache manager.
+
+        Args:
+            cache_dir: Directory for SSD cache files.
+            max_size_bytes: Maximum total size of SSD cache.
+        """
+        self._cache_dir = Path(cache_dir)
+        self._max_size = max_size_bytes
+        self._index = PagedSSDCacheIndex(max_size_bytes)
+        self._lock = threading.RLock()
+
+        # Statistics
+        self._stats = {
+            "saves": 0,
+            "loads": 0,
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "errors": 0,
+        }
+
+        # Initialize directory structure and scan existing files
+        self._init_directories()
+        self._scan_existing_files()
+
+        logger.info(
+            f"PagedSSDCacheManager initialized: dir={self._cache_dir}, "
+            f"max_size={format_bytes(max_size_bytes)}, "
+            f"existing_files={self._index.count}"
+        )
+
+    def _init_directories(self) -> None:
+        """Create cache directory structure."""
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create subdirectories for first hex character
+        for char in self.SUBDIR_CHARS:
+            subdir = self._cache_dir / char
+            subdir.mkdir(exist_ok=True)
+
+    def _get_file_path(self, block_hash: bytes) -> Path:
+        """
+        Get file path for a block hash.
+
+        Uses first character of hex hash as subdirectory.
+
+        Args:
+            block_hash: Block content hash.
+
+        Returns:
+            Path to the safetensors file.
+        """
+        hash_hex = block_hash.hex()
+        subdir = hash_hex[0]  # First character
+        filename = f"{hash_hex}.safetensors"
+        return self._cache_dir / subdir / filename
+
+    def _scan_existing_files(self) -> None:
+        """Scan cache directory for existing files and build index."""
+        logger.info(f"Scanning SSD cache directory: {self._cache_dir}")
+
+        scanned = 0
+        indexed = 0
+        errors = 0
+
+        for subdir in self.SUBDIR_CHARS:
+            subdir_path = self._cache_dir / subdir
+            if not subdir_path.exists():
+                continue
+
+            for file_path in subdir_path.glob("*.safetensors"):
+                scanned += 1
+                try:
+                    metadata = self._read_file_metadata(file_path)
+                    if metadata:
+                        self._index.add(metadata)
+                        indexed += 1
+                except Exception as e:
+                    logger.warning(f"Failed to read {file_path}: {e}")
+                    errors += 1
+
+        logger.info(
+            f"SSD cache scan complete: scanned={scanned}, indexed={indexed}, "
+            f"errors={errors}, total_size={format_bytes(self._index.total_size)}"
+        )
+
+    def _read_file_metadata(self, file_path: Path) -> Optional[PagedSSDBlockMetadata]:
+        """
+        Read metadata from an existing cache file.
+
+        Args:
+            file_path: Path to safetensors file.
+
+        Returns:
+            PagedSSDBlockMetadata if valid, None otherwise.
+        """
+        if not HAS_MLX:
+            return None
+
+        try:
+            # Load just the metadata without loading tensors
+            _, metadata = mx.load(str(file_path), return_metadata=True)
+
+            block_hash_hex = metadata.get("block_hash", "")
+            if not block_hash_hex:
+                return None
+
+            file_stat = file_path.stat()
+
+            # Parse cache type information if present
+            layer_cache_types = None
+            layer_meta_states = None
+
+            if "layer_cache_types" in metadata and metadata["layer_cache_types"]:
+                try:
+                    layer_cache_types = json.loads(metadata["layer_cache_types"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if "layer_meta_states" in metadata and metadata["layer_meta_states"]:
+                try:
+                    raw_meta_states = json.loads(metadata["layer_meta_states"])
+                    layer_meta_states = [tuple(m) if m else () for m in raw_meta_states]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            return PagedSSDBlockMetadata(
+                block_hash=bytes.fromhex(block_hash_hex),
+                file_path=file_path,
+                file_size=file_stat.st_size,
+                token_count=int(metadata.get("token_count", 0)),
+                created_at=file_stat.st_ctime,
+                last_access=file_stat.st_mtime,
+                num_layers=int(metadata.get("num_layers", 0)),
+                model_name=metadata.get("model_name", ""),
+                layer_cache_types=layer_cache_types,
+                layer_meta_states=layer_meta_states,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to read metadata from {file_path}: {e}")
+            return None
+
+    def save_block(
+        self,
+        block_hash: bytes,
+        cache_data: List[Any],
+        token_count: int,
+        model_name: str = "",
+        layer_cache_types: Optional[List[str]] = None,
+        layer_meta_states: Optional[List[Tuple]] = None,
+    ) -> bool:
+        """
+        Save a KV cache block to SSD storage.
+
+        Args:
+            block_hash: Content hash for the block.
+            cache_data: List of per-layer data. Each element is either:
+                - (keys, values) tuple for standard caches (KVCache, etc.)
+                - ('__cache_list__', sub_tensors) marker tuple for CacheList layers,
+                  where sub_tensors is List[Tuple[keys, values]] per sub-cache.
+            token_count: Number of tokens in the block.
+            model_name: Model name for cache isolation between different models.
+            layer_cache_types: Optional list of cache type names per layer
+                (e.g., ["KVCache", "ArraysCache", "KVCache", "CacheList"]).
+            layer_meta_states: Optional list of meta_state tuples per layer
+                for reconstruction (e.g., [(offset,), (keep, max_size, offset, _idx)]).
+
+        Returns:
+            True if saved successfully, False otherwise.
+        """
+        if not HAS_MLX:
+            logger.error("MLX not available, cannot save block")
+            return False
+
+        with self._lock:
+            # Check if already exists
+            if self._index.contains(block_hash):
+                self._index.touch(block_hash)
+                self._stats["hits"] += 1
+                return True
+
+            file_path = self._get_file_path(block_hash)
+
+            try:
+                # Enforce size limit before saving
+                self._enforce_size_limit_for_new_block()
+
+                # Prepare arrays for safetensors
+                arrays = {}
+                cache_list_meta = {}  # Temporary dict for CacheList sub_count
+                for i, layer_data in enumerate(cache_data):
+                    if (isinstance(layer_data, tuple) and len(layer_data) == 2
+                            and isinstance(layer_data[0], str)
+                            and layer_data[0] == '__cache_list__'):
+                        # CacheList: sub-indexed tensors
+                        sub_tensors = layer_data[1]
+                        for j, (sub_keys, sub_values) in enumerate(sub_tensors):
+                            arrays[f"layer_{i}_sub_{j}_keys"] = sub_keys
+                            arrays[f"layer_{i}_sub_{j}_values"] = sub_values
+                        cache_list_meta[f"layer_{i}_sub_count"] = str(len(sub_tensors))
+                    else:
+                        keys, values = layer_data
+                        arrays[f"layer_{i}_keys"] = keys
+                        arrays[f"layer_{i}_values"] = values
+
+                # Prepare metadata
+                metadata = {
+                    "block_hash": block_hash.hex(),
+                    "token_count": str(token_count),
+                    "num_layers": str(len(cache_data)),
+                    "model_name": model_name,
+                    "created_at": str(time.time()),
+                }
+
+                # Add cache type information if provided
+                if layer_cache_types:
+                    metadata["layer_cache_types"] = json.dumps(layer_cache_types)
+                if layer_meta_states:
+                    # Convert tuples to lists for JSON
+                    metadata["layer_meta_states"] = json.dumps(
+                        [list(m) if m else [] for m in layer_meta_states]
+                    )
+
+                # Merge CacheList sub_count metadata
+                metadata.update(cache_list_meta)
+
+                # Save as safetensors
+                mx.save_safetensors(str(file_path), arrays, metadata)
+
+                # Update index
+                file_stat = file_path.stat()
+                block_metadata = PagedSSDBlockMetadata(
+                    block_hash=block_hash,
+                    file_path=file_path,
+                    file_size=file_stat.st_size,
+                    token_count=token_count,
+                    created_at=time.time(),
+                    last_access=time.time(),
+                    num_layers=len(cache_data),
+                    model_name=model_name,
+                    layer_cache_types=layer_cache_types,
+                    layer_meta_states=layer_meta_states,
+                )
+                self._index.add(block_metadata)
+
+                self._stats["saves"] += 1
+                logger.debug(
+                    f"Saved block to SSD cache: {block_hash.hex()[:16]}..., "
+                    f"size={format_bytes(file_stat.st_size)}"
+                )
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to save block to SSD cache: {e}")
+                self._stats["errors"] += 1
+                # Clean up partial file
+                try:
+                    if file_path.exists():
+                        file_path.unlink()
+                except Exception:
+                    pass
+                return False
+
+    def load_block(
+        self,
+        block_hash: bytes,
+    ) -> Optional[List[Any]]:
+        """
+        Load a KV cache block from SSD storage.
+
+        Args:
+            block_hash: Content hash for the block.
+
+        Returns:
+            List of per-layer data, or None if not found.
+            Each element is either:
+            - (keys, values) tuple for standard caches
+            - List[Tuple[keys, values]] for CacheList layers
+        """
+        if not HAS_MLX:
+            logger.error("MLX not available, cannot load block")
+            return None
+
+        with self._lock:
+            metadata = self._index.get(block_hash)
+            if metadata is None:
+                self._stats["misses"] += 1
+                return None
+
+            file_path = metadata.file_path
+
+            if not file_path.exists():
+                logger.warning(f"SSD cache file missing: {file_path}")
+                self._index.remove(block_hash)
+                self._stats["misses"] += 1
+                return None
+
+            try:
+                # Load safetensors file
+                arrays, file_metadata = mx.load(str(file_path), return_metadata=True)
+
+                # Get layer_cache_types for CacheList detection
+                layer_cache_types = metadata.layer_cache_types
+                if not layer_cache_types and file_metadata and "layer_cache_types" in file_metadata:
+                    try:
+                        layer_cache_types = json.loads(file_metadata["layer_cache_types"])
+                    except (json.JSONDecodeError, TypeError):
+                        layer_cache_types = None
+
+                # Reconstruct cache_data
+                cache_data = []
+                num_layers = metadata.num_layers
+
+                for i in range(num_layers):
+                    cache_type = (
+                        layer_cache_types[i]
+                        if layer_cache_types and i < len(layer_cache_types)
+                        else None
+                    )
+
+                    if cache_type == 'CacheList':
+                        sub_count_key = f"layer_{i}_sub_count"
+                        sub_count = 0
+                        if file_metadata and sub_count_key in file_metadata:
+                            try:
+                                sub_count = int(file_metadata[sub_count_key])
+                            except (ValueError, TypeError):
+                                pass
+
+                        if sub_count > 0:
+                            sub_tensors = []
+                            for j in range(sub_count):
+                                sk_key = f"layer_{i}_sub_{j}_keys"
+                                sv_key = f"layer_{i}_sub_{j}_values"
+                                if sk_key not in arrays or sv_key not in arrays:
+                                    logger.error(
+                                        f"Missing sub-cache {j} for CacheList layer {i}"
+                                    )
+                                    return None
+                                sub_tensors.append((arrays[sk_key], arrays[sv_key]))
+                            cache_data.append(sub_tensors)
+                        else:
+                            # Placeholder block — standard format
+                            keys_key = f"layer_{i}_keys"
+                            values_key = f"layer_{i}_values"
+                            if keys_key not in arrays or values_key not in arrays:
+                                logger.error(f"Missing keys/values for layer {i}")
+                                return None
+                            cache_data.append((arrays[keys_key], arrays[values_key]))
+                    else:
+                        keys_key = f"layer_{i}_keys"
+                        values_key = f"layer_{i}_values"
+
+                        if keys_key not in arrays or values_key not in arrays:
+                            logger.error(f"Missing keys/values for layer {i} in {file_path}")
+                            return None
+
+                        cache_data.append((arrays[keys_key], arrays[values_key]))
+
+                # Update access time
+                self._index.touch(block_hash)
+                self._stats["loads"] += 1
+                self._stats["hits"] += 1
+
+                logger.debug(f"Loaded block from SSD cache: {block_hash.hex()[:16]}...")
+                return cache_data
+
+            except Exception as e:
+                logger.error(f"Failed to load block from SSD cache: {e}")
+                self._stats["errors"] += 1
+                # Remove corrupted entry
+                self._index.remove(block_hash)
+                try:
+                    file_path.unlink()
+                except Exception:
+                    pass
+                return None
+
+    def load_block_with_metadata(
+        self,
+        block_hash: bytes,
+    ) -> Tuple[Optional[List[Any]], Optional[Dict[str, Any]]]:
+        """
+        Load a KV cache block with its metadata from SSD storage.
+
+        This method returns both the cache data and the metadata including
+        cache type information for proper reconstruction.
+
+        Args:
+            block_hash: Content hash for the block.
+
+        Returns:
+            Tuple of (cache_data, metadata_dict) where:
+            - cache_data: List of per-layer data, or None.
+              Each element is either (keys, values) or List[Tuple[keys, values]]
+              for CacheList layers.
+            - metadata_dict: Dictionary with cache type info, or None
+              {
+                  "layer_cache_types": List[str],  # per-layer type names
+                  "layer_meta_states": List[Tuple],  # per-layer meta states
+                  "num_layers": int,
+                  "token_count": int,
+              }
+        """
+        if not HAS_MLX:
+            logger.error("MLX not available, cannot load block")
+            return None, None
+
+        with self._lock:
+            block_metadata = self._index.get(block_hash)
+            if block_metadata is None:
+                self._stats["misses"] += 1
+                return None, None
+
+            file_path = block_metadata.file_path
+
+            if not file_path.exists():
+                logger.warning(f"SSD cache file missing: {file_path}")
+                self._index.remove(block_hash)
+                self._stats["misses"] += 1
+                return None, None
+
+            try:
+                # Load safetensors file
+                arrays, file_metadata = mx.load(str(file_path), return_metadata=True)
+
+                # Parse layer_cache_types early for CacheList detection
+                layer_cache_types = block_metadata.layer_cache_types
+                if not layer_cache_types and file_metadata and "layer_cache_types" in file_metadata:
+                    try:
+                        layer_cache_types = json.loads(
+                            file_metadata["layer_cache_types"]
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        layer_cache_types = None
+
+                # Reconstruct cache_data
+                cache_data = []
+                num_layers = block_metadata.num_layers
+
+                for i in range(num_layers):
+                    cache_type = (
+                        layer_cache_types[i]
+                        if layer_cache_types and i < len(layer_cache_types)
+                        else None
+                    )
+
+                    if cache_type == 'CacheList':
+                        sub_count_key = f"layer_{i}_sub_count"
+                        sub_count = 0
+                        if file_metadata and sub_count_key in file_metadata:
+                            try:
+                                sub_count = int(file_metadata[sub_count_key])
+                            except (ValueError, TypeError):
+                                pass
+
+                        if sub_count > 0:
+                            sub_tensors = []
+                            for j in range(sub_count):
+                                sk_key = f"layer_{i}_sub_{j}_keys"
+                                sv_key = f"layer_{i}_sub_{j}_values"
+                                if sk_key not in arrays or sv_key not in arrays:
+                                    logger.error(
+                                        f"Missing sub-cache {j} for CacheList layer {i}"
+                                    )
+                                    return None, None
+                                sub_tensors.append((arrays[sk_key], arrays[sv_key]))
+                            cache_data.append(sub_tensors)
+                        else:
+                            # Placeholder block — standard format
+                            keys_key = f"layer_{i}_keys"
+                            values_key = f"layer_{i}_values"
+                            if keys_key not in arrays or values_key not in arrays:
+                                logger.error(f"Missing keys/values for layer {i}")
+                                return None, None
+                            cache_data.append((arrays[keys_key], arrays[values_key]))
+                    else:
+                        keys_key = f"layer_{i}_keys"
+                        values_key = f"layer_{i}_values"
+
+                        if keys_key not in arrays or values_key not in arrays:
+                            logger.error(f"Missing keys/values for layer {i} in {file_path}")
+                            return None, None
+
+                        cache_data.append((arrays[keys_key], arrays[values_key]))
+
+                # Build metadata dict for reconstruction
+                # Use already-parsed layer_cache_types (includes fallback to file metadata)
+                metadata_dict = {
+                    "num_layers": num_layers,
+                    "token_count": block_metadata.token_count,
+                    "model_name": block_metadata.model_name,
+                    "layer_cache_types": layer_cache_types,
+                    "layer_meta_states": block_metadata.layer_meta_states,
+                }
+
+                if not metadata_dict["layer_meta_states"] and file_metadata:
+                    if "layer_meta_states" in file_metadata:
+                        try:
+                            raw = json.loads(file_metadata["layer_meta_states"])
+                            metadata_dict["layer_meta_states"] = [
+                                tuple(m) if m else () for m in raw
+                            ]
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+
+                # Update access time
+                self._index.touch(block_hash)
+                self._stats["loads"] += 1
+                self._stats["hits"] += 1
+
+                logger.debug(
+                    f"Loaded block with metadata from SSD cache: {block_hash.hex()[:16]}..."
+                )
+                return cache_data, metadata_dict
+
+            except Exception as e:
+                logger.error(f"Failed to load block from SSD cache: {e}")
+                self._stats["errors"] += 1
+                # Remove corrupted entry
+                self._index.remove(block_hash)
+                try:
+                    file_path.unlink()
+                except Exception:
+                    pass
+                return None, None
+
+    def get_block_metadata(self, block_hash: bytes) -> Optional[PagedSSDBlockMetadata]:
+        """
+        Get metadata for a block without loading the data.
+
+        Args:
+            block_hash: Content hash for the block.
+
+        Returns:
+            PagedSSDBlockMetadata if found, None otherwise.
+        """
+        return self._index.get(block_hash)
+
+    def has_block(self, block_hash: bytes) -> bool:
+        """
+        Check if a block exists in SSD storage.
+
+        Args:
+            block_hash: Content hash for the block.
+
+        Returns:
+            True if block exists in SSD cache.
+        """
+        return self._index.contains(block_hash)
+
+    def delete_block(self, block_hash: bytes) -> bool:
+        """
+        Delete a block from SSD storage.
+
+        Args:
+            block_hash: Content hash for the block.
+
+        Returns:
+            True if deleted successfully.
+        """
+        with self._lock:
+            metadata = self._index.remove(block_hash)
+            if metadata is None:
+                return False
+
+            try:
+                if metadata.file_path.exists():
+                    metadata.file_path.unlink()
+                    logger.debug(f"Deleted SSD cache file: {metadata.file_path}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to delete SSD cache file: {e}")
+                return False
+
+    def _enforce_size_limit_for_new_block(self) -> None:
+        """Enforce size limit before adding a new block."""
+        # Estimate average block size (use 1MB as conservative estimate)
+        estimated_new_size = 1 * 1024 * 1024
+
+        target_size = self._max_size - estimated_new_size
+        if target_size < 0:
+            target_size = int(self._max_size * 0.9)
+
+        if self._index.total_size > target_size:
+            evicted = self._index.evict_until_size(target_size)
+            for metadata in evicted:
+                try:
+                    if metadata.file_path.exists():
+                        metadata.file_path.unlink()
+                        self._stats["evictions"] += 1
+                        logger.debug(f"Evicted SSD cache file: {metadata.file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete evicted file: {e}")
+
+    def enforce_size_limit(self) -> int:
+        """
+        Enforce SSD cache size limit by evicting LRU files.
+
+        Returns:
+            Number of bytes freed.
+        """
+        with self._lock:
+            initial_size = self._index.total_size
+
+            if initial_size <= self._max_size:
+                return 0
+
+            target_size = int(self._max_size * 0.9)  # 90% of max
+            evicted = self._index.evict_until_size(target_size)
+
+            for metadata in evicted:
+                try:
+                    if metadata.file_path.exists():
+                        metadata.file_path.unlink()
+                        self._stats["evictions"] += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete evicted file: {e}")
+
+            freed = initial_size - self._index.total_size
+            logger.info(
+                f"SSD cache size enforcement: freed {format_bytes(freed)}, "
+                f"evicted {len(evicted)} files"
+            )
+            return freed
+
+    def clear(self) -> int:
+        """
+        Clear all SSD cache files.
+
+        Returns:
+            Number of files deleted.
+        """
+        with self._lock:
+            count = 0
+            for block_hash in self._index.get_all_hashes():
+                if self.delete_block(block_hash):
+                    count += 1
+
+            logger.info(f"Cleared SSD cache: deleted {count} files")
+            return count
+
+    def get_stats(self) -> PagedSSDCacheStats:
+        """
+        Get SSD cache statistics.
+
+        Returns:
+            PagedSSDCacheStats with cache metrics.
+        """
+        with self._lock:
+            return PagedSSDCacheStats(
+                hits=self._stats["hits"],
+                misses=self._stats["misses"],
+                evictions=self._stats["evictions"],
+                saves=self._stats["saves"],
+                loads=self._stats["loads"],
+                errors=self._stats["errors"],
+                total_size_bytes=self._index.total_size,
+                num_files=self._index.count,
+            )
+
+    def get_stats_dict(self) -> Dict[str, Any]:
+        """
+        Get SSD cache statistics as a dictionary.
+
+        This method provides the legacy dictionary format for compatibility.
+
+        Returns:
+            Dictionary with cache statistics.
+        """
+        with self._lock:
+            return {
+                "cache_dir": str(self._cache_dir),
+                "max_size": self._max_size,
+                "max_size_formatted": format_bytes(self._max_size),
+                "total_size": self._index.total_size,
+                "total_size_formatted": format_bytes(self._index.total_size),
+                "utilization": (
+                    self._index.total_size / self._max_size
+                    if self._max_size > 0
+                    else 0.0
+                ),
+                "num_files": self._index.count,
+                **self._stats,
+            }
+
+    # =========================================================================
+    # Prefix Index (for restoring cache on server restart)
+    # =========================================================================
+
+    def save_prefix_index(
+        self,
+        entries: List[Dict[str, Any]],
+        model_name: str = "",
+    ) -> bool:
+        """
+        Save prefix index to enable cache restoration on server restart.
+
+        Each entry maps a token sequence to its block chain:
+        {
+            "prefix_hash": str,      # hash of token sequence
+            "block_hashes": List[str],  # ordered block hashes (hex)
+            "num_tokens": int
+        }
+
+        Args:
+            entries: List of prefix index entries.
+            model_name: Model name for cache isolation.
+
+        Returns:
+            True if saved successfully.
+        """
+        import json
+
+        index_file = self._cache_dir / "prefix_index.json"
+
+        try:
+            index_data = {
+                "version": 1,
+                "model_name": model_name,
+                "created_at": time.time(),
+                "entries": entries,
+            }
+
+            with open(index_file, "w") as f:
+                json.dump(index_data, f)
+
+            logger.info(f"Saved prefix index: {len(entries)} entries to {index_file}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save prefix index: {e}")
+            return False
+
+    def load_prefix_index(
+        self,
+        model_name: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        Load prefix index from disk.
+
+        Args:
+            model_name: Model name to filter entries (empty = all).
+
+        Returns:
+            List of prefix index entries, empty list if not found.
+        """
+        import json
+
+        index_file = self._cache_dir / "prefix_index.json"
+
+        if not index_file.exists():
+            logger.debug(f"No prefix index found at {index_file}")
+            return []
+
+        try:
+            with open(index_file, "r") as f:
+                index_data = json.load(f)
+
+            # Version check
+            version = index_data.get("version", 0)
+            if version != 1:
+                logger.warning(f"Unknown prefix index version: {version}")
+                return []
+
+            # Model name filter
+            stored_model = index_data.get("model_name", "")
+            if model_name and stored_model and model_name != stored_model:
+                logger.warning(
+                    f"Prefix index model mismatch: {stored_model} != {model_name}"
+                )
+                return []
+
+            entries = index_data.get("entries", [])
+            logger.info(f"Loaded prefix index: {len(entries)} entries from {index_file}")
+            return entries
+
+        except Exception as e:
+            logger.error(f"Failed to load prefix index: {e}")
+            return []
+
+    def close(self) -> None:
+        """Close the SSD cache manager and flush any pending operations."""
+        logger.debug("PagedSSDCacheManager closed")
+
+    def __repr__(self) -> str:
+        return (
+            f"PagedSSDCacheManager(dir={self._cache_dir}, "
+            f"size={format_bytes(self._index.total_size)}/"
+            f"{format_bytes(self._max_size)}, "
+            f"files={self._index.count})"
+        )
+
+    # =========================================================================
+    # CacheManager ABC Interface Implementation
+    # =========================================================================
+
+    def fetch(self, key: Any) -> Tuple[Optional[Any], bool]:
+        """
+        Fetch a cached block from SSD storage.
+
+        Args:
+            key: Block hash (bytes) to look up.
+
+        Returns:
+            Tuple of (cache_data, True) if found, (None, False) otherwise.
+        """
+        if not isinstance(key, bytes):
+            return None, False
+
+        cache_data = self.load_block(key)
+        if cache_data is not None:
+            return cache_data, True
+        return None, False
+
+    def store(self, key: Any, value: Any) -> bool:
+        """
+        Store a block in SSD cache.
+
+        Args:
+            key: Block hash (bytes).
+            value: Tuple of (cache_data, token_count) or just cache_data.
+
+        Returns:
+            True if stored successfully.
+        """
+        if not isinstance(key, bytes):
+            return False
+
+        if isinstance(value, tuple) and len(value) >= 2:
+            cache_data, token_count = value[0], value[1]
+            model_name = value[2] if len(value) > 2 else ""
+        else:
+            cache_data = value
+            token_count = 0
+            model_name = ""
+
+        return self.save_block(key, cache_data, token_count, model_name)
+
+    def evict(self, key: Any) -> bool:
+        """
+        Evict a specific block from SSD cache.
+
+        Args:
+            key: Block hash (bytes) to evict.
+
+        Returns:
+            True if evicted, False if not found.
+        """
+        if not isinstance(key, bytes):
+            return False
+
+        return self.delete_block(key)
+
+    @property
+    def size(self) -> int:
+        """
+        Get the current number of cached blocks.
+
+        Returns:
+            Number of cached blocks.
+        """
+        return self._index.count
+
+    @property
+    def max_size(self) -> int:
+        """
+        Get the maximum cache size in bytes.
+
+        Returns:
+            Maximum cache size in bytes.
+        """
+        return self._max_size
+
+

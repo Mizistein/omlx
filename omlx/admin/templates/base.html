@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}oMLX Admin{% endblock %}</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Google Fonts - Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                    animation: {
+                        'fade-in-up': 'fadeInUp 0.5s ease-out forwards',
+                    },
+                    keyframes: {
+                        fadeInUp: {
+                            '0%': { opacity: '0', transform: 'translateY(10px)' },
+                            '100%': { opacity: '1', transform: 'translateY(0)' },
+                        }
+                    }
+                },
+            },
+        }
+    </script>
+
+    <script>
+        // Apply theme immediately to prevent flash of wrong theme
+        (function() {
+            var theme = localStorage.getItem('omlx-chat-theme') || 'light';
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+    </script>
+
+    <style>
+        body {
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        [x-cloak] { display: none !important; }
+
+        /* Subtle grain texture for background */
+        .bg-grain {
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.03'/%3E%3C/svg%3E");
+        }
+
+        /* Card hover effect */
+        .card-hover {
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .card-hover:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 20px 40px -10px rgba(0,0,0,0.1);
+        }
+
+        /* Input focus ring */
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(0,0,0,0.1);
+        }
+    </style>
+
+    {% block head %}{% endblock %}
+</head>
+<body class="font-sans bg-white text-neutral-900 antialiased selection:bg-neutral-900 selection:text-white">
+    {% block content %}{% endblock %}
+
+    <script>
+        // Debug: Check Lucide loading
+        console.log('[Debug] Lucide loaded:', typeof lucide, lucide);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('[Debug] DOMContentLoaded - icons found:', document.querySelectorAll('[data-lucide]').length);
+            console.log('[Debug] Calling lucide.createIcons()');
+            lucide.createIcons();
+            console.log('[Debug] After createIcons - icons remaining:', document.querySelectorAll('[data-lucide]').length);
+            console.log('[Debug] SVGs created:', document.querySelectorAll('svg.lucide').length);
+        });
+
+        document.addEventListener('alpine:initialized', () => {
+            console.log('[Debug] alpine:initialized');
+            setTimeout(() => {
+                console.log('[Debug] setTimeout after alpine:initialized - icons found:', document.querySelectorAll('[data-lucide]').length);
+                lucide.createIcons();
+                console.log('[Debug] After createIcons - SVGs:', document.querySelectorAll('svg.lucide').length);
+            }, 0);
+        });
+
+        window.addEventListener('load', () => {
+            console.log('[Debug] window.load');
+            lucide.createIcons();
+        });
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
