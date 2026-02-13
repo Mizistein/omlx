@@ -809,6 +809,22 @@ async def list_models_status(_: bool = Depends(verify_api_key)):
     return _server_state.engine_pool.get_status()
 
 
+@app.post("/v1/models/{model_id}/unload")
+async def unload_model(model_id: str, _: bool = Depends(verify_api_key)):
+    """Manually unload a model from memory."""
+    if _server_state.engine_pool is None:
+        raise HTTPException(status_code=503, detail="Server not initialized")
+
+    entry = _server_state.engine_pool.get_entry(model_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
+    if entry.engine is None:
+        raise HTTPException(status_code=400, detail=f"Model not loaded: {model_id}")
+
+    await _server_state.engine_pool._unload_engine(model_id)
+    return {"status": "ok", "model_id": model_id}
+
+
 # =============================================================================
 # Embeddings Endpoint
 # =============================================================================

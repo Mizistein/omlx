@@ -811,6 +811,27 @@ async def list_models(is_admin: bool = Depends(require_admin)):
     return {"models": models}
 
 
+@router.post("/api/models/{model_id}/unload")
+async def unload_model(
+    model_id: str,
+    is_admin: bool = Depends(require_admin),
+):
+    """Manually unload a model from memory."""
+    engine_pool = _get_engine_pool()
+    if engine_pool is None:
+        raise HTTPException(status_code=503, detail="Engine pool not initialized")
+
+    entry = engine_pool.get_entry(model_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
+    if entry.engine is None:
+        raise HTTPException(status_code=400, detail=f"Model not loaded: {model_id}")
+
+    await engine_pool._unload_engine(model_id)
+    logger.info(f"Manually unloaded model: {model_id}")
+    return {"status": "ok", "model_id": model_id, "message": f"Unloaded {model_id}"}
+
+
 @router.put("/api/models/{model_id}/settings")
 async def update_model_settings(
     model_id: str,

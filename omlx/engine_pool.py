@@ -206,8 +206,17 @@ class EnginePool:
                     model_id, entry.estimated_size, self._max_model_memory
                 )
 
-            # Pre-load eviction: ensure memory is available BEFORE loading
-            await self._ensure_memory_available(entry.estimated_size)
+            # Pre-load eviction: reserve 25% extra for KV cache headroom
+            # so other models get evicted earlier, leaving room for context.
+            # Only applies when other models are loaded; if the model fits
+            # on its own (weights-only), allow it to load regardless.
+            kv_headroom = int(entry.estimated_size * 0.25)
+            required_with_headroom = entry.estimated_size + kv_headroom
+            if required_with_headroom > self._max_model_memory:
+                # Model alone exceeds limit with headroom — load without it
+                await self._ensure_memory_available(entry.estimated_size)
+            else:
+                await self._ensure_memory_available(required_with_headroom)
 
             # Now load the model
             await self._load_engine(model_id)
