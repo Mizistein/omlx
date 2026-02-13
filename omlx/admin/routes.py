@@ -1438,20 +1438,41 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
         for subdir in sorted(model_dir.iterdir()):
             if not subdir.is_dir() or subdir.name.startswith("."):
                 continue
-            if not (subdir / "config.json").exists():
-                continue
 
-            total_size = sum(
-                f.stat().st_size for f in subdir.rglob("*") if f.is_file()
-            )
-            models.append(
-                {
-                    "name": subdir.name,
-                    "path": str(subdir),
-                    "size": total_size,
-                    "size_formatted": format_size(total_size),
-                }
-            )
+            if (subdir / "config.json").exists():
+                # Level 1: direct model folder
+                total_size = sum(
+                    f.stat().st_size for f in subdir.rglob("*") if f.is_file()
+                )
+                models.append(
+                    {
+                        "name": subdir.name,
+                        "path": str(subdir),
+                        "size": total_size,
+                        "size_formatted": format_size(total_size),
+                    }
+                )
+            else:
+                # Level 2: organization folder — scan children
+                for child in sorted(subdir.iterdir()):
+                    if not child.is_dir() or child.name.startswith("."):
+                        continue
+                    if not (child / "config.json").exists():
+                        continue
+
+                    total_size = sum(
+                        f.stat().st_size
+                        for f in child.rglob("*")
+                        if f.is_file()
+                    )
+                    models.append(
+                        {
+                            "name": child.name,
+                            "path": str(child),
+                            "size": total_size,
+                            "size_formatted": format_size(total_size),
+                        }
+                    )
 
     return {"models": models}
 
@@ -1472,7 +1493,20 @@ async def delete_hf_model(
         global_settings.model.model_dir
         or global_settings.model.get_model_dir(global_settings.base_path)
     )
+    # Search for model in both flat and org-folder layouts
     model_path = model_dir / model_name
+    if not (model_path.is_dir() and (model_path / "config.json").exists()):
+        # Try two-level: search inside organization folders
+        model_path = None
+        for subdir in model_dir.iterdir():
+            if not subdir.is_dir() or subdir.name.startswith("."):
+                continue
+            candidate = subdir / model_name
+            if candidate.is_dir() and (candidate / "config.json").exists():
+                model_path = candidate
+                break
+        if model_path is None:
+            raise HTTPException(status_code=404, detail="Model not found")
 
     # Validate path traversal
     try:
@@ -1480,9 +1514,6 @@ async def delete_hf_model(
             raise HTTPException(status_code=400, detail="Invalid model name")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid model name")
-
-    if not model_path.exists():
-        raise HTTPException(status_code=404, detail="Model not found")
 
     if not model_path.is_dir():
         raise HTTPException(status_code=400, detail="Not a model directory")

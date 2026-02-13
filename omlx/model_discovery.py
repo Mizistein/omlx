@@ -167,16 +167,67 @@ def estimate_model_size(model_path: Path) -> int:
     return int(total_size * overhead_factor)
 
 
+def _is_model_dir(path: Path) -> bool:
+    """Check if a directory contains a valid model (has config.json)."""
+    return (path / "config.json").exists()
+
+
+def _register_model(
+    models: dict[str, DiscoveredModel],
+    model_dir: Path,
+    model_id: str,
+) -> None:
+    """Try to register a single model directory into the models dict."""
+    try:
+        model_type = detect_model_type(model_dir)
+        if model_type == "embedding":
+            engine_type: EngineType = "embedding"
+        elif model_type == "reranker":
+            engine_type = "reranker"
+        else:
+            engine_type = "batched"
+        estimated_size = estimate_model_size(model_dir)
+
+        models[model_id] = DiscoveredModel(
+            model_id=model_id,
+            model_path=str(model_dir),
+            model_type=model_type,
+            engine_type=engine_type,
+            estimated_size=estimated_size,
+        )
+
+        size_gb = estimated_size / (1024**3)
+        logger.info(
+            f"Discovered model: {model_id} "
+            f"(type: {model_type}, engine: {engine_type}, size: {size_gb:.2f}GB)"
+        )
+    except Exception as e:
+        logger.error(f"Failed to discover model {model_id}: {e}")
+
+
 def discover_models(model_dir: Path) -> dict[str, DiscoveredModel]:
     """
-    Scan model directory and create entries for each valid subdirectory.
+    Scan model directory with two-level discovery.
 
-    Directory structure:
-    model_dir/
-    ├── llama-3b/          → model_id: "llama-3b"
-    │   ├── config.json
-    │   └── *.safetensors
-    └── qwen-7b/           → model_id: "qwen-7b"
+    Supports both flat and organized directory layouts:
+
+    Flat (one level):
+        model_dir/
+        ├── llama-3b/          → model_id: "llama-3b"
+        │   ├── config.json
+        │   └── *.safetensors
+        └── qwen-7b/           → model_id: "qwen-7b"
+
+    Organized (two levels):
+        model_dir/
+        ├── mlx-community/
+        │   ├── llama-3b/      → model_id: "llama-3b"
+        │   └── qwen-7b/       → model_id: "qwen-7b"
+        └── Qwen/
+            └── Qwen3-8B/      → model_id: "Qwen3-8B"
+
+    If a first-level subdirectory has config.json, it's treated as a model.
+    Otherwise, its children are scanned for models (organization folder).
 
     Args:
         model_dir: Path to directory containing model subdirectories
@@ -193,49 +244,27 @@ def discover_models(model_dir: Path) -> dict[str, DiscoveredModel]:
     models: dict[str, DiscoveredModel] = {}
 
     for subdir in sorted(model_dir.iterdir()):
-        if not subdir.is_dir():
+        if not subdir.is_dir() or subdir.name.startswith("."):
             continue
 
-        # Skip hidden directories
-        if subdir.name.startswith("."):
-            continue
+        if _is_model_dir(subdir):
+            # Level 1: direct model folder
+            _register_model(models, subdir, subdir.name)
+        else:
+            # Level 2: organization folder — scan children
+            has_children = False
+            for child in sorted(subdir.iterdir()):
+                if not child.is_dir() or child.name.startswith("."):
+                    continue
+                if _is_model_dir(child):
+                    has_children = True
+                    _register_model(models, child, child.name)
 
-        # Check if it's a valid model directory
-        config_path = subdir / "config.json"
-        if not config_path.exists():
-            logger.warning(f"Skipping {subdir.name}: no config.json found")
-            continue
-
-        model_id = subdir.name
-
-        try:
-            model_type = detect_model_type(subdir)
-            # Select engine type based on model type
-            if model_type == "embedding":
-                engine_type: EngineType = "embedding"
-            elif model_type == "reranker":
-                engine_type = "reranker"
-            else:
-                engine_type = "batched"
-            estimated_size = estimate_model_size(subdir)
-
-            models[model_id] = DiscoveredModel(
-                model_id=model_id,
-                model_path=str(subdir),
-                model_type=model_type,
-                engine_type=engine_type,
-                estimated_size=estimated_size,
-            )
-
-            size_gb = estimated_size / (1024**3)
-            logger.info(
-                f"Discovered model: {model_id} "
-                f"(type: {model_type}, engine: {engine_type}, size: {size_gb:.2f}GB)"
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to discover model {model_id}: {e}")
-            continue
+            if not has_children:
+                logger.debug(
+                    f"Skipping {subdir.name}: no config.json found "
+                    f"(not a model or organization folder)"
+                )
 
     return models
 
