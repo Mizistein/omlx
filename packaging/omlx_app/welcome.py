@@ -360,8 +360,6 @@ class WelcomeWindowController(NSObject):
         self.status_label.setFrame_(NSMakeRect(40, y, WINDOW_WIDTH - 80, 16))
         container.addSubview_(self.status_label)
 
-        y -= 16
-
         # === Step 3: Open Settings Card ===
         step3_card = self._create_card()
         step3_card.setFrame_(NSMakeRect(24, y - 96, WINDOW_WIDTH - 48, 96))

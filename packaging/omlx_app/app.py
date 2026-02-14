@@ -609,7 +609,9 @@ class OMLXAppDelegate(NSObject):
     @objc.IBAction
     def showAbout_(self, sender):
         """Show About dialog."""
-        from AppKit import NSAlert
+        import webbrowser
+
+        from AppKit import NSAlert, NSAlertFirstButtonReturn
 
         alert = NSAlert.alloc().init()
         alert.setMessageText_("About oMLX")
@@ -619,7 +621,10 @@ class OMLXAppDelegate(NSObject):
             f"Version: {__version__}"
         )
         alert.addButtonWithTitle_("OK")
-        alert.runModal()
+        alert.addButtonWithTitle_("GitHub")
+
+        if alert.runModal() != NSAlertFirstButtonReturn:
+            webbrowser.open("https://github.com/jundot")
 
     @objc.IBAction
     def quitApp_(self, sender):
