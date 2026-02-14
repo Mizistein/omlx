@@ -858,3 +858,73 @@ class TestPagedSSDCacheManagerCacheList:
         assert len(loaded_data[0]) == 1
         assert loaded_data[0][0][0].shape == (1, 8, 64, 64)
         assert metadata["layer_cache_types"] == ["CacheList"]
+
+    def test_save_load_cache_list_with_zero_dim_values(self, ssd_cache, mx):
+        """Test round-trip for CacheList where sub-cache has zero-dim values.
+
+        This covers the deepseek_v32 / GLM-5 case where the DSA indexer
+        sub-cache stores values with shape (B, 1, N, 0) — head_dim=0.
+        """
+        block_hash = b"zero_dim_cl_test_ha_"
+        sub_keys1 = mx.zeros((1, 1, 64, 512))   # Main attention kv_latent
+        sub_values1 = mx.zeros((1, 1, 64, 64))   # Main attention k_pe
+        sub_keys2 = mx.zeros((1, 1, 64, 128))    # Indexer keys
+        sub_values2 = mx.zeros((1, 1, 64, 0))    # Indexer values (zero head_dim)
+
+        cache_data = [
+            ('__cache_list__', [
+                (sub_keys1, sub_values1),
+                (sub_keys2, sub_values2),
+            ]),
+        ]
+        layer_cache_types = ["CacheList"]
+
+        result = ssd_cache.save_block(
+            block_hash, cache_data, token_count=64,
+            model_name="test", layer_cache_types=layer_cache_types,
+        )
+        assert result is True
+
+        # Load back and verify round-trip correctness
+        loaded = ssd_cache.load_block(block_hash)
+        assert loaded is not None
+        assert len(loaded) == 1
+        assert isinstance(loaded[0], list)
+        assert len(loaded[0]) == 2
+
+        # Sub-cache 0: normal tensors preserved
+        assert loaded[0][0][0].shape == (1, 1, 64, 512)
+        assert loaded[0][0][1].shape == (1, 1, 64, 64)
+
+        # Sub-cache 1: keys normal, values zero-dim reconstructed
+        assert loaded[0][1][0].shape == (1, 1, 64, 128)
+        assert loaded[0][1][1].shape == (1, 1, 64, 0)
+
+    def test_save_load_zero_dim_with_load_block_with_metadata(self, ssd_cache, mx):
+        """Test load_block_with_metadata also handles zero-dim tensors."""
+        block_hash = b"zero_dim_meta_test_h"
+        sub_keys = mx.zeros((1, 1, 32, 128))
+        sub_values = mx.zeros((1, 1, 32, 0))
+
+        cache_data = [
+            ('__cache_list__', [(sub_keys, sub_values)]),
+        ]
+        layer_cache_types = ["CacheList"]
+        layer_meta_states = [
+            (["KVCache"], [(32,)]),
+        ]
+
+        ssd_cache.save_block(
+            block_hash, cache_data, token_count=32,
+            model_name="test",
+            layer_cache_types=layer_cache_types,
+            layer_meta_states=layer_meta_states,
+        )
+
+        loaded_data, metadata = ssd_cache.load_block_with_metadata(block_hash)
+        assert loaded_data is not None
+        assert metadata is not None
+        assert len(loaded_data) == 1
+        assert isinstance(loaded_data[0], list)
+        assert loaded_data[0][0][0].shape == (1, 1, 32, 128)
+        assert loaded_data[0][0][1].shape == (1, 1, 32, 0)

@@ -45,6 +45,21 @@ except ImportError:
     mx = None
 
 
+def _has_zero_dim(tensor: Any) -> bool:
+    """Check if a tensor has any zero-dimension axis (unsupported by safetensors)."""
+    return hasattr(tensor, "shape") and any(d == 0 for d in tensor.shape)
+
+
+def _encode_shape(shape) -> str:
+    """Encode tensor shape as comma-separated string for safetensors metadata."""
+    return ",".join(str(d) for d in shape)
+
+
+def _decode_shape(shape_str: str) -> tuple:
+    """Decode shape string back to tuple of ints."""
+    return tuple(int(d) for d in shape_str.split(","))
+
+
 def parse_size(size_str: str) -> int:
     """
     Parse a human-readable size string to bytes.
@@ -530,13 +545,40 @@ class PagedSSDCacheManager(CacheManager):
                         # CacheList: sub-indexed tensors
                         sub_tensors = layer_data[1]
                         for j, (sub_keys, sub_values) in enumerate(sub_tensors):
-                            arrays[f"layer_{i}_sub_{j}_keys"] = sub_keys
-                            arrays[f"layer_{i}_sub_{j}_values"] = sub_values
+                            # Handle zero-dimension tensors that safetensors
+                            # cannot serialize (e.g., DSA indexer values with
+                            # shape (B, 1, N, 0))
+                            if _has_zero_dim(sub_keys):
+                                arrays[f"layer_{i}_sub_{j}_keys"] = mx.zeros((1,))
+                                cache_list_meta[f"layer_{i}_sub_{j}_keys_zero_dim"] = (
+                                    _encode_shape(sub_keys.shape)
+                                )
+                            else:
+                                arrays[f"layer_{i}_sub_{j}_keys"] = sub_keys
+                            if _has_zero_dim(sub_values):
+                                arrays[f"layer_{i}_sub_{j}_values"] = mx.zeros((1,))
+                                cache_list_meta[f"layer_{i}_sub_{j}_values_zero_dim"] = (
+                                    _encode_shape(sub_values.shape)
+                                )
+                            else:
+                                arrays[f"layer_{i}_sub_{j}_values"] = sub_values
                         cache_list_meta[f"layer_{i}_sub_count"] = str(len(sub_tensors))
                     else:
                         keys, values = layer_data
-                        arrays[f"layer_{i}_keys"] = keys
-                        arrays[f"layer_{i}_values"] = values
+                        if _has_zero_dim(keys):
+                            arrays[f"layer_{i}_keys"] = mx.zeros((1,))
+                            cache_list_meta[f"layer_{i}_keys_zero_dim"] = (
+                                _encode_shape(keys.shape)
+                            )
+                        else:
+                            arrays[f"layer_{i}_keys"] = keys
+                        if _has_zero_dim(values):
+                            arrays[f"layer_{i}_values"] = mx.zeros((1,))
+                            cache_list_meta[f"layer_{i}_values_zero_dim"] = (
+                                _encode_shape(values.shape)
+                            )
+                        else:
+                            arrays[f"layer_{i}_values"] = values
 
                 # Prepare metadata
                 metadata = {
@@ -672,7 +714,16 @@ class PagedSSDCacheManager(CacheManager):
                                         f"Missing sub-cache {j} for CacheList layer {i}"
                                     )
                                     return None
-                                sub_tensors.append((arrays[sk_key], arrays[sv_key]))
+                                sub_keys = arrays[sk_key]
+                                sub_values = arrays[sv_key]
+                                # Reconstruct zero-dimension tensors
+                                sk_zd = f"layer_{i}_sub_{j}_keys_zero_dim"
+                                sv_zd = f"layer_{i}_sub_{j}_values_zero_dim"
+                                if file_metadata and sk_zd in file_metadata:
+                                    sub_keys = mx.zeros(_decode_shape(file_metadata[sk_zd]))
+                                if file_metadata and sv_zd in file_metadata:
+                                    sub_values = mx.zeros(_decode_shape(file_metadata[sv_zd]))
+                                sub_tensors.append((sub_keys, sub_values))
                             cache_data.append(sub_tensors)
                         else:
                             # Placeholder block — standard format
@@ -690,7 +741,16 @@ class PagedSSDCacheManager(CacheManager):
                             logger.error(f"Missing keys/values for layer {i} in {file_path}")
                             return None
 
-                        cache_data.append((arrays[keys_key], arrays[values_key]))
+                        keys = arrays[keys_key]
+                        values = arrays[values_key]
+                        # Reconstruct zero-dimension tensors
+                        k_zd = f"layer_{i}_keys_zero_dim"
+                        v_zd = f"layer_{i}_values_zero_dim"
+                        if file_metadata and k_zd in file_metadata:
+                            keys = mx.zeros(_decode_shape(file_metadata[k_zd]))
+                        if file_metadata and v_zd in file_metadata:
+                            values = mx.zeros(_decode_shape(file_metadata[v_zd]))
+                        cache_data.append((keys, values))
 
                 # Update access time
                 self._index.touch(block_hash)
@@ -799,7 +859,16 @@ class PagedSSDCacheManager(CacheManager):
                                         f"Missing sub-cache {j} for CacheList layer {i}"
                                     )
                                     return None, None
-                                sub_tensors.append((arrays[sk_key], arrays[sv_key]))
+                                sub_keys = arrays[sk_key]
+                                sub_values = arrays[sv_key]
+                                # Reconstruct zero-dimension tensors
+                                sk_zd = f"layer_{i}_sub_{j}_keys_zero_dim"
+                                sv_zd = f"layer_{i}_sub_{j}_values_zero_dim"
+                                if file_metadata and sk_zd in file_metadata:
+                                    sub_keys = mx.zeros(_decode_shape(file_metadata[sk_zd]))
+                                if file_metadata and sv_zd in file_metadata:
+                                    sub_values = mx.zeros(_decode_shape(file_metadata[sv_zd]))
+                                sub_tensors.append((sub_keys, sub_values))
                             cache_data.append(sub_tensors)
                         else:
                             # Placeholder block — standard format
@@ -817,7 +886,16 @@ class PagedSSDCacheManager(CacheManager):
                             logger.error(f"Missing keys/values for layer {i} in {file_path}")
                             return None, None
 
-                        cache_data.append((arrays[keys_key], arrays[values_key]))
+                        keys = arrays[keys_key]
+                        values = arrays[values_key]
+                        # Reconstruct zero-dimension tensors
+                        k_zd = f"layer_{i}_keys_zero_dim"
+                        v_zd = f"layer_{i}_values_zero_dim"
+                        if file_metadata and k_zd in file_metadata:
+                            keys = mx.zeros(_decode_shape(file_metadata[k_zd]))
+                        if file_metadata and v_zd in file_metadata:
+                            values = mx.zeros(_decode_shape(file_metadata[v_zd]))
+                        cache_data.append((keys, values))
 
                 # Build metadata dict for reconstruction
                 # Use already-parsed layer_cache_types (includes fallback to file metadata)

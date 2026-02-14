@@ -759,10 +759,39 @@ class BlockAwarePrefixCache(CacheManager):
                         # Non-last block: store placeholder to preserve layer count
                         block_slices.append((mx.zeros((1,)), mx.zeros((1,))))
                 elif cache_type_name == 'CacheList':
-                    # CacheList: last-block-only storage (like ArraysCache)
-                    if is_last_block:
-                        state = layer_state['state']  # List[sub_state]
-                        if isinstance(state, list) and len(state) > 0:
+                    state = layer_state['state']  # List[sub_state]
+                    if not isinstance(state, list) or len(state) == 0:
+                        block_slices.append((mx.zeros((1,)), mx.zeros((1,))))
+                        continue
+
+                    # Check if all sub-caches are sliceable 4D KVCache tensors
+                    all_sub_sliceable = all(
+                        isinstance(ss, (list, tuple)) and len(ss) >= 2
+                        and hasattr(ss[0], 'shape') and len(ss[0].shape) == 4
+                        for ss in state
+                    )
+
+                    if all_sub_sliceable:
+                        # Per-block slicing: slice each sub-cache along seq_len
+                        sub_tensors = []
+                        for sub_state in state:
+                            sub_keys, sub_values = sub_state[0], sub_state[1]
+                            seq_len = sub_keys.shape[2]
+                            actual_end = min(end_idx, seq_len)
+                            if start_idx >= actual_end:
+                                sub_tensors.append((
+                                    self._clone_tensor(sub_keys[:, :, 0:0, :]),
+                                    self._clone_tensor(sub_values[:, :, 0:0, :]),
+                                ))
+                            else:
+                                sub_tensors.append((
+                                    self._clone_tensor(sub_keys[:, :, start_idx:actual_end, :]),
+                                    self._clone_tensor(sub_values[:, :, start_idx:actual_end, :]),
+                                ))
+                        block_slices.append(('__cache_list__', sub_tensors))
+                    else:
+                        # Non-sliceable sub-caches: last-block-only storage
+                        if is_last_block:
                             sub_tensors = []
                             for sub_state in state:
                                 if isinstance(sub_state, (list, tuple)) and len(sub_state) >= 2:
@@ -770,12 +799,9 @@ class BlockAwarePrefixCache(CacheManager):
                                         self._clone_tensor(sub_state[0]),
                                         self._clone_tensor(sub_state[1]),
                                     ))
-                            # Mark as CacheList for SSD save_block
                             block_slices.append(('__cache_list__', sub_tensors))
                         else:
                             block_slices.append((mx.zeros((1,)), mx.zeros((1,))))
-                    else:
-                        block_slices.append((mx.zeros((1,)), mx.zeros((1,))))
                 else:
                     # Other non-sliceable cache (ArraysCache/MambaCache)
                     # Last-block-only storage strategy (same as RotatingKVCache).
@@ -1151,7 +1177,8 @@ class BlockAwarePrefixCache(CacheManager):
                 if cache_type_name == 'CacheList':
                     last_block_layer_data = all_block_data[-1][layer_idx]
 
-                    # Placeholder detection (partial match → reject)
+                    # Placeholder detection (partial match → reject for
+                    # non-sliceable CacheList, e.g. containing ArraysCache)
                     if (isinstance(last_block_layer_data, tuple)
                             and len(last_block_layer_data) == 2
                             and hasattr(last_block_layer_data[0], 'shape')
@@ -1162,30 +1189,71 @@ class BlockAwarePrefixCache(CacheManager):
                         )
                         return None
 
-                    # Data shape validation: must be List[Tuple]
-                    if not isinstance(last_block_layer_data, list):
+                    # Collect CacheList data from all blocks that have List[Tuple]
+                    cl_block_data = []
+                    for block_data in all_block_data:
+                        bd = block_data[layer_idx]
+                        if isinstance(bd, list) and all(
+                            isinstance(t, (list, tuple)) and len(t) >= 2
+                            for t in bd
+                        ):
+                            cl_block_data.append(bd)
+
+                    if not cl_block_data:
                         logger.error(
-                            f"CacheList layer {layer_idx}: expected List[Tuple] but got "
-                            f"{type(last_block_layer_data).__name__}. Rejecting cache."
-                        )
-                        return None
-                    if not all(
-                        isinstance(t, (list, tuple)) and len(t) >= 2
-                        for t in last_block_layer_data
-                    ):
-                        logger.error(
-                            f"CacheList layer {layer_idx}: sub-cache states have "
-                            f"invalid format. Rejecting cache."
+                            f"CacheList layer {layer_idx}: no valid block data found"
                         )
                         return None
 
-                    # last_block_layer_data: List[Tuple[keys, values]] per sub-cache
+                    # Determine sub-cache count from first valid block
+                    num_sub_caches = len(cl_block_data[0])
+
+                    if len(cl_block_data) > 1:
+                        # Per-block sliced CacheList: concatenate sub-caches
+                        concatenated_sub_states = []
+                        for j in range(num_sub_caches):
+                            all_keys = [bd[j][0] for bd in cl_block_data]
+                            all_values = [bd[j][1] for bd in cl_block_data]
+                            cat_keys = mx.concatenate(all_keys, axis=2)
+                            # Handle zero-dim values (e.g., DSA indexer head_dim=0)
+                            if any(d == 0 for d in all_values[0].shape):
+                                shape = list(all_values[0].shape)
+                                shape[2] = sum(v.shape[2] for v in all_values)
+                                cat_values = mx.zeros(tuple(shape))
+                            else:
+                                cat_values = mx.concatenate(all_values, axis=2)
+                            concatenated_sub_states.append((cat_keys, cat_values))
+                    else:
+                        # Single block: use directly
+                        concatenated_sub_states = cl_block_data[0]
+
+                    # Build meta_state with correct offsets for reconstructed
+                    # sequence length (may differ from original if partial match)
                     meta_state = None
                     if last_block_meta_states and layer_idx < len(last_block_meta_states):
                         meta_state = last_block_meta_states[layer_idx]
 
+                    if meta_state and isinstance(meta_state, (list, tuple)) and len(meta_state) >= 2:
+                        # Adjust sub-cache offsets to actual concatenated seq_len
+                        class_names = meta_state[0]
+                        adjusted_sub_metas = []
+                        for j in range(num_sub_caches):
+                            actual_seq_len = concatenated_sub_states[j][0].shape[2]
+                            if j < len(meta_state[1]):
+                                orig_sub_meta = meta_state[1][j]
+                                if isinstance(orig_sub_meta, (list, tuple)) and len(orig_sub_meta) > 0:
+                                    # Replace offset (first element) with actual seq_len
+                                    adjusted_sub_metas.append(
+                                        (actual_seq_len,) + tuple(orig_sub_meta[1:])
+                                    )
+                                else:
+                                    adjusted_sub_metas.append((actual_seq_len,))
+                            else:
+                                adjusted_sub_metas.append((actual_seq_len,))
+                        meta_state = (class_names, adjusted_sub_metas)
+
                     cache = handler.reconstruct_cache(
-                        {'sub_states': last_block_layer_data}, meta_state
+                        {'sub_states': concatenated_sub_states}, meta_state
                     )
                     if cache is None:
                         logger.error(f"CacheList layer {layer_idx}: reconstruction failed")

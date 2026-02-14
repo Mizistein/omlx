@@ -1127,8 +1127,12 @@ class TestPrefixCacheCacheList:
         assert len(result[0][1]) == 1  # One sub-cache
         assert result[0][1][0][0].shape == (1, 8, 32, 64)
 
-    def test_extract_block_tensor_slice_cache_list_non_last_block(self, prefix_cache, mx):
-        """Test _extract_block_tensor_slice for CacheList on non-last block."""
+    def test_extract_block_tensor_slice_cache_list_non_last_sliceable(self, prefix_cache, mx):
+        """Test _extract_block_tensor_slice for CacheList with sliceable sub-caches on non-last block.
+
+        When all sub-caches are 4D KVCache tensors, they should be sliced
+        per-block instead of using last-block-only placeholder storage.
+        """
         from omlx.cache.hybrid_cache import ModelCacheConfig
 
         sub_keys = mx.zeros((1, 8, 32, 64))
@@ -1144,14 +1148,49 @@ class TestPrefixCacheCacheList:
         config = ModelCacheConfig.from_type_list(["CacheList"])
 
         result = prefix_cache._extract_block_tensor_slice(
-            cache_data, 0, 32, model_cache_config=config, is_last_block=False,
+            cache_data, 0, 16, model_cache_config=config, is_last_block=False,
         )
 
         assert result is not None
         assert len(result) == 1
-        # Non-last block: placeholder
-        assert result[0][0].shape == (1,)
-        assert result[0][1].shape == (1,)
+        # Sliceable sub-caches: per-block sliced data, not placeholder
+        assert result[0][0] == '__cache_list__'
+        assert len(result[0][1]) == 1
+        assert result[0][1][0][0].shape == (1, 8, 16, 64)
+        assert result[0][1][0][1].shape == (1, 8, 16, 64)
+
+    def test_extract_block_tensor_slice_cache_list_zero_dim_values(self, prefix_cache, mx):
+        """Test per-block slicing for CacheList with zero-dim values (DSA indexer)."""
+        from omlx.cache.hybrid_cache import ModelCacheConfig
+
+        # GLM-5 style: main attention + indexer with zero head_dim
+        sub_keys1 = mx.zeros((1, 1, 64, 512))
+        sub_values1 = mx.zeros((1, 1, 64, 64))
+        sub_keys2 = mx.zeros((1, 1, 64, 128))
+        sub_values2 = mx.zeros((1, 1, 64, 0))  # zero head_dim
+
+        cache_data = [
+            {
+                'state': [(sub_keys1, sub_values1), (sub_keys2, sub_values2)],
+                'cache_type': 'CacheList',
+                'class_name': 'CacheList',
+            },
+        ]
+        config = ModelCacheConfig.from_type_list(["CacheList"])
+
+        result = prefix_cache._extract_block_tensor_slice(
+            cache_data, 0, 32, model_cache_config=config, is_last_block=False,
+        )
+
+        assert result is not None
+        assert result[0][0] == '__cache_list__'
+        assert len(result[0][1]) == 2
+        # Sub-cache 0: sliced normally
+        assert result[0][1][0][0].shape == (1, 1, 32, 512)
+        assert result[0][1][0][1].shape == (1, 1, 32, 64)
+        # Sub-cache 1: sliced, values remain zero-dim
+        assert result[0][1][1][0].shape == (1, 1, 32, 128)
+        assert result[0][1][1][1].shape == (1, 1, 32, 0)
 
     def test_validate_block_cache_data_cache_list(self, prefix_cache, mx):
         """Test _validate_block_cache_data with CacheList layers."""
