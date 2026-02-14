@@ -1320,6 +1320,43 @@ async def get_logs(
 # =============================================================================
 
 
+def _get_engine_info() -> dict:
+    """Get commit SHA and GitHub URL for engine packages."""
+    import importlib.metadata
+    import json
+
+    engines = {}
+    packages = {
+        "mlx-lm": "https://github.com/ml-explore/mlx-lm",
+        "mlx-embeddings": "https://github.com/Blaizzy/mlx-embeddings",
+    }
+
+    for pkg_name, default_url in packages.items():
+        info = {"name": pkg_name, "version": None, "commit": None, "url": None}
+        try:
+            dist = importlib.metadata.distribution(pkg_name)
+            info["version"] = dist.version
+
+            # PEP 610: direct_url.json exists for git-installed packages
+            direct_url_text = dist.read_text("direct_url.json")
+            if direct_url_text:
+                direct_url = json.loads(direct_url_text)
+                vcs_info = direct_url.get("vcs_info", {})
+                commit = vcs_info.get("commit_id")
+                if commit:
+                    info["commit"] = commit
+                    repo_url = direct_url.get("url", default_url)
+                    repo_url = repo_url.rstrip("/")
+                    if repo_url.endswith(".git"):
+                        repo_url = repo_url[:-4]
+                    info["url"] = f"{repo_url}/commit/{commit}"
+        except Exception:
+            pass
+        engines[pkg_name] = info
+
+    return engines
+
+
 @router.get("/api/stats")
 async def get_server_stats(
     model: str = "",
@@ -1349,6 +1386,7 @@ async def get_server_stats(
             if global_settings
             else 200000
         ),
+        "engines": _get_engine_info(),
     }
 
 

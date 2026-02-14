@@ -471,7 +471,7 @@
                     </div>
 
                     <!-- Claude Code with oMLX -->
-                    <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden">
+                    <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-8">
                         <div class="flex items-center justify-between px-6 py-4 bg-neutral-100 border-b border-neutral-200">
                             <div class="flex items-center gap-3">
                                 <i data-lucide="terminal" class="w-4 h-4 text-neutral-500"></i>
@@ -535,6 +535,34 @@
                                 </div>
                                 <p class="mt-2 text-xs text-neutral-400 leading-relaxed">Scales token usage so Claude Code's auto-compact triggers correctly with smaller context models.</p>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- Engine Versions -->
+                    <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden">
+                        <div class="flex items-center justify-between px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                            <div class="flex items-center gap-3">
+                                <i data-lucide="cpu" class="w-4 h-4 text-neutral-500"></i>
+                                <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">Engine Versions</span>
+                            </div>
+                        </div>
+                        <div class="divide-y divide-neutral-100">
+                            <template x-for="[key, engine] in Object.entries(stats.engines || {})" :key="key">
+                                <div class="flex items-center justify-between px-6 py-4">
+                                    <label class="text-sm text-neutral-700 font-medium" x-text="engine.name"></label>
+                                    <div class="flex items-center gap-2">
+                                        <template x-if="engine.commit && engine.url">
+                                            <a :href="engine.url" target="_blank" rel="noopener noreferrer"
+                                               class="px-3 py-1.5 bg-neutral-50 rounded-lg text-sm font-mono text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-all"
+                                               x-text="engine.commit.substring(0, 7)"></a>
+                                        </template>
+                                        <template x-if="!engine.commit">
+                                            <code class="px-3 py-1.5 bg-neutral-50 rounded-lg text-sm font-mono"
+                                                  x-text="engine.version || 'unknown'"></code>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
                         </div>
                     </div>
                 </div>
@@ -993,6 +1021,14 @@
                                                 <i data-lucide="box" class="w-4 h-4 text-neutral-500"></i>
                                             </div>
                                             <p class="text-sm font-medium text-neutral-900 truncate" x-text="model.id"></p>
+                                            <button x-data="{ copied: false }"
+                                                    @click.stop="copyToClipboard(model.id); copied = true; setTimeout(() => copied = false, 2000)"
+                                                    class="p-1 rounded-md transition-all flex-shrink-0"
+                                                    :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
+                                                    title="Copy model name">
+                                                <svg x-show="!copied" class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                                                <svg x-show="copied" x-cloak class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                                            </button>
                                         </div>
 
                                         <!-- Type -->
@@ -1377,10 +1413,18 @@
                                 </div>
                             </template>
                             <template x-for="model in hfModels" :key="model.name">
-                                <div class="px-6 py-4 flex items-center justify-between hover:bg-neutral-50 transition-colors">
-                                    <div class="min-w-0 flex-1">
-                                        <span class="text-sm font-medium text-neutral-900 truncate block" x-text="model.name"></span>
-                                        <span class="text-xs text-neutral-400" x-text="model.size_formatted"></span>
+                                <div class="px-6 py-3 flex items-center justify-between hover:bg-neutral-50 transition-colors">
+                                    <div class="min-w-0 flex-1 flex items-center gap-2">
+                                        <span class="text-sm font-medium text-neutral-900 truncate" x-text="model.name"></span>
+                                        <span class="text-xs text-neutral-400 flex-shrink-0" x-text="'(' + model.size_formatted + ')'"></span>
+                                        <button x-data="{ copied: false }"
+                                                @click.stop="copyToClipboard(model.name); copied = true; setTimeout(() => copied = false, 2000)"
+                                                class="p-1 rounded-md transition-all flex-shrink-0"
+                                                :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
+                                                title="Copy model name">
+                                            <svg x-show="!copied" class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                                            <svg x-show="copied" x-cloak class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                                        </button>
                                     </div>
                                     <div class="flex items-center gap-2 ml-4 shrink-0">
                                         <!-- Delete button -->
@@ -1711,6 +1755,7 @@
                 total_requests: 0,
                 port: 8000,
                 api_key: '',
+                engines: {},
             },
             selectedClaudeModel: '',
             selectedStatsModel: '',
