@@ -12,6 +12,8 @@ from typing import Optional
 
 import objc
 import requests
+
+from omlx._version import __version__
 from AppKit import (
     NSApp,
     NSAppearanceNameDarkAqua,
@@ -215,7 +217,7 @@ class OMLXAppDelegate(NSObject):
             if resp.status_code == 200:
                 data = resp.json()
                 latest = data["tag_name"].lstrip("v")
-                current = "0.1.1"  # TODO: import from __version__
+                current = __version__
 
                 if self._is_newer_version(latest, current):
                     self._update_info = {
@@ -614,7 +616,7 @@ class OMLXAppDelegate(NSObject):
         alert.setInformativeText_(
             "oMLX - LLM inference,\noptimized for your Mac\n\n"
             "Built with MLX and mlx-lm\n"
-            "Version: 0.1.1"
+            f"Version: {__version__}"
         )
         alert.addButtonWithTitle_("OK")
         alert.runModal()

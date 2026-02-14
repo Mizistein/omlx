@@ -56,6 +56,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.responses import StreamingResponse as _BaseStreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from omlx._version import __version__
+
 from .api.anthropic_models import (
     MessagesRequest as AnthropicMessagesRequest,
 )
@@ -299,7 +301,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="oMLX API",
     description="High-performance OpenAI-compatible LLM inference API for Apple Silicon",
-    version="0.1.1",
+    version=__version__,
     lifespan=lifespan,
 )
 

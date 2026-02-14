@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "omlx"
-version = "0.1.1"
+dynamic = ["version"]
 description = "High-performance LLM inference server for Apple Silicon"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -74,6 +74,9 @@ Repository = "https://github.com/jundot/omlx"
 
 [project.scripts]
 omlx = "omlx.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "omlx._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

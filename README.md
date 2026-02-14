@@ -30,7 +30,7 @@
 
 > *Every LLM server I tried made me choose between convenience and control. I wanted to pin everyday models in memory, auto-swap heavier ones on demand, set context limits - and manage it all from a menu bar.*
 >
-> *oMLX persists KV cache to SSD — even when context changes mid-conversation, all past context stays cached and reusable across requests, making local LLMs practical for real coding work with tools like Claude Code. That's why I built it.*
+> *oMLX persists KV cache to SSD - even when context changes mid-conversation, all past context stays cached and reusable across requests, making local LLMs practical for real coding work with tools like Claude Code. That's why I built it.*
 
 ## Install
 
@@ -52,7 +52,7 @@ Requires Python 3.10+ and Apple Silicon (M1/M2/M3/M4).
 
 ### macOS App
 
-Launch oMLX from your Applications folder. The Welcome screen guides you through three steps — model directory, server start, and first model download. That's it.
+Launch oMLX from your Applications folder. The Welcome screen guides you through three steps - model directory, server start, and first model download. That's it.
 
 <p align="center">
   <img src="docs/images/Screenshot 2026-02-10 at 00.36.32.png" alt="oMLX Welcome Screen" width="500">
@@ -69,27 +69,27 @@ The server discovers models from subdirectories automatically. Any OpenAI-compat
 
 ## Features
 
-oMLX is built on top of [vllm-mlx](https://github.com/waybarrios/vllm-mlx), extending it with paged SSD caching, multi-model serving, an admin dashboard, Claude Code optimization, and Anthropic API support. Currently supports text-based LLMs — VLM and OCR model support is planned for upcoming milestones.
+oMLX is built on top of [vllm-mlx](https://github.com/waybarrios/vllm-mlx), extending it with paged SSD caching, multi-model serving, an admin dashboard, Claude Code optimization, and Anthropic API support. Currently supports text-based LLMs - VLM and OCR model support is planned for upcoming milestones.
 
-**macOS menubar app** — Native menubar app to start, stop, and monitor the server without opening a terminal.
+**macOS menubar app** - Native menubar app to start, stop, and monitor the server without opening a terminal.
 
-**Admin dashboard** — Web UI at `/admin` for model management, chat, real-time monitoring, and per-model settings.
+**Admin dashboard** - Web UI at `/admin` for model management, chat, real-time monitoring, and per-model settings.
 
-**Built-in model downloader** — Search and download MLX models from HuggingFace directly in the admin dashboard. No CLI or `git clone` needed.
+**Built-in model downloader** - Search and download MLX models from HuggingFace directly in the admin dashboard. No CLI or `git clone` needed.
 
 <p align="center">
   <img src="docs/images/Screenshot 2026-02-10 at 00.35.01.png" alt="oMLX Model Downloader" width="720">
 </p>
 
-**Claude Code optimization** — Context scaling support for running smaller context models with Claude Code. Scales reported token counts so that auto-compact triggers at the right timing, and SSE keep-alive prevents read timeouts during long prefill.
+**Claude Code optimization** - Context scaling support for running smaller context models with Claude Code. Scales reported token counts so that auto-compact triggers at the right timing, and SSE keep-alive prevents read timeouts during long prefill.
 
-**Paged KV cache with SSD tiering** — Block-based cache management inspired by vLLM, with prefix sharing and Copy-on-Write. When GPU memory fills up, blocks are offloaded to SSD. On the next request with a matching prefix, they're restored from disk instead of recomputed from scratch — even after a server restart.
+**Paged KV cache with SSD tiering** - Block-based cache management inspired by vLLM, with prefix sharing and Copy-on-Write. When GPU memory fills up, blocks are offloaded to SSD. On the next request with a matching prefix, they're restored from disk instead of recomputed from scratch - even after a server restart.
 
-**Continuous batching** — Handles concurrent requests through mlx-lm's BatchGenerator. Prefill and completion batch sizes are configurable.
+**Continuous batching** - Handles concurrent requests through mlx-lm's BatchGenerator. Prefill and completion batch sizes are configurable.
 
-**Multi-model serving** — Load LLMs, embedding models, and rerankers within the same server. Least-recently-used models are evicted automatically when memory runs low. Pin frequently used models to keep them loaded.
+**Multi-model serving** - Load LLMs, embedding models, and rerankers within the same server. Least-recently-used models are evicted automatically when memory runs low. Pin frequently used models to keep them loaded.
 
-**API compatibility** — Drop-in replacement for OpenAI and Anthropic APIs.
+**API compatibility** - Drop-in replacement for OpenAI and Anthropic APIs.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -100,7 +100,7 @@ oMLX is built on top of [vllm-mlx](https://github.com/waybarrios/vllm-mlx), exte
 | `POST /v1/rerank` | Document reranking |
 | `GET /v1/models` | List available models |
 
-**Tool calling & structured output** — Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration.
+**Tool calling & structured output** - Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration.
 
 ## Models
 
@@ -173,6 +173,14 @@ pip install -e ".[dev]"
 pytest -m "not slow"
 ```
 
+## Contributing
+
+We welcome contributions! See [Contributing Guide](docs/CONTRIBUTING.md) for details.
+
+- Bug fixes and improvements
+- Performance optimizations
+- Documentation improvements
+
 ## License
 
 [Apache 2.0](LICENSE)
@@ -180,5 +188,7 @@ pytest -m "not slow"
 ## Acknowledgments
 
 - [MLX](https://github.com/ml-explore/mlx) and [mlx-lm](https://github.com/ml-explore/mlx-lm) by Apple
-- [vllm-mlx](https://github.com/vllm-project/vllm-mlx) — oMLX originated as a fork of vllm-mlx v0.1.0, since re-architected with multi-model serving, paged SSD caching, an admin panel, and a standalone macOS menu bar app
+- [vllm-mlx](https://github.com/vllm-project/vllm-mlx) - oMLX originated as a fork of vllm-mlx v0.1.0, since re-architected with multi-model serving, paged SSD caching, an admin panel, and a standalone macOS menu bar app
+- [venvstacks](https://venvstacks.lmstudio.ai) - Portable Python environment layering for the macOS app bundle
+- [mlx-embeddings](https://github.com/Blaizzy/mlx-embeddings) - Embedding model support for Apple Silicon
 

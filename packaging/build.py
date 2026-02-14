@@ -30,7 +30,19 @@ DIST_DIR = SCRIPT_DIR / "dist"
 WHEELS_DIR = SCRIPT_DIR / "_wheels"
 APP_NAME = "oMLX"
 APP_BUNDLE = f"{APP_NAME}.app"
-VERSION = "0.1.1"
+
+
+def _read_version() -> str:
+    """Read version from omlx/_version.py (single source of truth)."""
+    version_file = SCRIPT_DIR.parent / "omlx" / "_version.py"
+    content = version_file.read_text()
+    match = re.search(r'__version__\s*=\s*"([^"]+)"', content)
+    if not match:
+        raise RuntimeError(f"Cannot find __version__ in {version_file}")
+    return match.group(1)
+
+
+VERSION = _read_version()
 
 
 def clean_all():
