@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-omlx: High-performance LLM inference server for Apple Silicon
+omlx: LLM inference server, optimized for your Mac
 
 This package provides native Apple Silicon GPU acceleration using
 Apple's MLX framework and mlx-lm for LLMs.

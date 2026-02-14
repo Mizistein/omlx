@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "omlx"
 dynamic = ["version"]
-description = "High-performance LLM inference server for Apple Silicon"
+description = "LLM inference server, optimized for your Mac"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"

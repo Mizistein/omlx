@@ -300,7 +300,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="oMLX API",
-    description="High-performance OpenAI-compatible LLM inference API for Apple Silicon",
+    description="LLM inference, optimized for your Mac",
     version=__version__,
     lifespan=lifespan,
 )

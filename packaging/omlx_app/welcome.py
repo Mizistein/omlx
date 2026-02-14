@@ -151,7 +151,7 @@ class WelcomeWindowController(NSObject):
         # Subtitle
         y -= 22
         subtitle = NSTextField.labelWithString_(
-            "High-performance LLM inference for Apple Silicon"
+            "LLM inference, optimized for your Mac"
         )
         subtitle.setFont_(NSFont.systemFontOfSize_(13))
         subtitle.setTextColor_(NSColor.secondaryLabelColor())
