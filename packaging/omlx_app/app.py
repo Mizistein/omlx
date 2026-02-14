@@ -243,6 +243,15 @@ class OMLXAppDelegate(NSObject):
         except Exception:
             return False
 
+    def openUpdate_(self, sender):
+        """Open GitHub releases page when update menu item is clicked."""
+        url = (
+            self._update_info.get("url")
+            if self._update_info
+            else "https://github.com/jundot/omlx/releases"
+        )
+        webbrowser.open(url)
+
     # --- Menu building ---
 
     def _create_menu_icon(self, sf_symbol: str) -> Optional[NSImage]:
