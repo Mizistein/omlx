@@ -25,7 +25,6 @@ import shutil
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,7 +47,6 @@ except ImportError:
 
 
 # --- Async I/O constants ---
-_SSD_LOAD_TIMEOUT = 5.0       # Load timeout in seconds
 _MAX_PENDING_WRITES = 64      # Max write queue depth (backpressure)
 
 
@@ -407,11 +405,6 @@ class PagedSSDCacheManager(CacheManager):
             daemon=True,
         )
         self._writer_thread.start()
-
-        # Thread pool for non-blocking loads (timeout support)
-        self._load_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="ssd-cache-loader"
-        )
 
         logger.info(
             f"PagedSSDCacheManager initialized: dir={self._cache_dir}, "
@@ -929,11 +922,12 @@ class PagedSSDCacheManager(CacheManager):
             return None
 
         try:
-            # Load with timeout to prevent inference deadlock
-            future = self._load_executor.submit(
-                mx.load, str(file_path), return_metadata=True
-            )
-            arrays, file_metadata = future.result(timeout=_SSD_LOAD_TIMEOUT)
+            # Load directly on the inference thread (Metal-safe).
+            # SSD read for a ~10MB block takes ~2ms @ 5GB/s — negligible.
+            # Previous executor-based approach caused deadlocks when
+            # mx.load() in a worker thread contested Metal GPU resources
+            # with the main inference thread.
+            arrays, file_metadata = mx.load(str(file_path), return_metadata=True)
 
             # Get layer_cache_types for CacheList detection
             layer_cache_types = metadata.layer_cache_types
@@ -956,14 +950,6 @@ class PagedSSDCacheManager(CacheManager):
 
             logger.debug(f"Loaded block from SSD cache: {block_hash.hex()[:16]}...")
             return cache_data
-
-        except FutureTimeoutError:
-            logger.warning(
-                f"SSD cache load timed out ({_SSD_LOAD_TIMEOUT}s) for "
-                f"{block_hash.hex()[:16]}..., treating as cache miss"
-            )
-            self._stats["misses"] += 1
-            return None
 
         except Exception as e:
             logger.error(f"Failed to load block from SSD cache: {e}")
@@ -1051,11 +1037,9 @@ class PagedSSDCacheManager(CacheManager):
             return None, None
 
         try:
-            # Load with timeout to prevent inference deadlock
-            future = self._load_executor.submit(
-                mx.load, str(file_path), return_metadata=True
-            )
-            arrays, file_metadata = future.result(timeout=_SSD_LOAD_TIMEOUT)
+            # Load directly on the inference thread (Metal-safe).
+            # See load_block() for rationale on removing the executor.
+            arrays, file_metadata = mx.load(str(file_path), return_metadata=True)
 
             # Parse layer_cache_types early for CacheList detection
             layer_cache_types = block_metadata.layer_cache_types
@@ -1101,14 +1085,6 @@ class PagedSSDCacheManager(CacheManager):
                 f"Loaded block with metadata from SSD cache: {block_hash.hex()[:16]}..."
             )
             return cache_data, metadata_dict
-
-        except FutureTimeoutError:
-            logger.warning(
-                f"SSD cache load timed out ({_SSD_LOAD_TIMEOUT}s) for "
-                f"{block_hash.hex()[:16]}..., treating as cache miss"
-            )
-            self._stats["misses"] += 1
-            return None, None
 
         except Exception as e:
             logger.error(f"Failed to load block from SSD cache: {e}")
@@ -1402,9 +1378,6 @@ class PagedSSDCacheManager(CacheManager):
         self._writer_thread.join(timeout=30)
         if self._writer_thread.is_alive():
             logger.warning("SSD cache writer thread did not stop within 30s")
-
-        # Shut down load executor
-        self._load_executor.shutdown(wait=False)
 
         logger.debug("PagedSSDCacheManager closed")
 

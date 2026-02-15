@@ -1043,11 +1043,9 @@ class TestAsyncWriteAndTimeoutLoad:
         assert metadata["model_name"] == "test-model"
         assert metadata["layer_cache_types"] == ["KVCache"]
 
-    def test_load_timeout_returns_none(self, ssd_cache, mx):
-        """Verify that a slow disk read times out and returns None."""
-        from omlx.cache import paged_ssd_cache
-
-        block_hash = b"timeout_test_hash_12"
+    def test_load_error_returns_none(self, ssd_cache, mx):
+        """Verify that a corrupted file returns None and cleans up index."""
+        block_hash = b"error_test_hash_1234"
         cache_data = [
             (mx.zeros((1, 8, 32, 64)), mx.zeros((1, 8, 32, 64)))
         ]
@@ -1058,7 +1056,6 @@ class TestAsyncWriteAndTimeoutLoad:
             cache_data=cache_data,
             token_count=32,
         )
-        # Wait for pending write to flush
         import time as time_mod
         for _ in range(50):
             with ssd_cache._pending_writes_lock:
@@ -1066,20 +1063,57 @@ class TestAsyncWriteAndTimeoutLoad:
                     break
             time_mod.sleep(0.1)
 
-        # Now mock mx.load to simulate a slow read
-        original_timeout = paged_ssd_cache._SSD_LOAD_TIMEOUT
-        paged_ssd_cache._SSD_LOAD_TIMEOUT = 0.5  # Very short timeout
+        # Mock mx.load to simulate a corrupted file
+        with patch("mlx.core.load", side_effect=OSError("corrupted file")):
+            loaded = ssd_cache.load_block(block_hash)
+            assert loaded is None  # Should return None, not raise
 
-        def slow_load(*args, **kwargs):
-            time_mod.sleep(2.0)  # Longer than timeout
-            return {}, {}
+        # Block should be removed from index (corrupted entry cleanup)
+        assert not ssd_cache.has_block(block_hash)
 
-        try:
-            with patch("mlx.core.load", side_effect=slow_load):
-                loaded = ssd_cache.load_block(block_hash)
-                assert loaded is None  # Should timeout, not deadlock
-        finally:
-            paged_ssd_cache._SSD_LOAD_TIMEOUT = original_timeout
+    def test_load_no_executor_deadlock(self, ssd_cache, mx):
+        """Regression test: _load_executor must not exist (prevents deadlock)."""
+        # The old implementation used ThreadPoolExecutor(max_workers=1) which
+        # caused deadlocks when mx.load() in a worker thread contested Metal
+        # GPU resources with the main inference thread. Verify it's gone.
+        assert not hasattr(ssd_cache, '_load_executor'), (
+            "_load_executor should not exist — it causes Metal GPU deadlocks"
+        )
+
+    def test_sequential_loads_no_queue_blocking(self, ssd_cache, mx):
+        """Regression test: consecutive loads must not block each other."""
+        import time as time_mod
+
+        # Save 5 different blocks
+        hashes = []
+        for i in range(5):
+            block_hash = f"seq_load_test_{i:04d}_".encode()[:20]
+            hashes.append(block_hash)
+            cache_data = [
+                (mx.zeros((1, 8, 32, 64)), mx.zeros((1, 8, 32, 64)))
+            ]
+            ssd_cache.save_block(block_hash, cache_data, token_count=32)
+
+        # Wait for all pending writes to flush
+        for _ in range(100):
+            with ssd_cache._pending_writes_lock:
+                if not ssd_cache._pending_writes:
+                    break
+            time_mod.sleep(0.1)
+
+        # Load all 5 blocks sequentially — should complete quickly
+        t0 = time_mod.time()
+        for block_hash in hashes:
+            loaded = ssd_cache.load_block(block_hash)
+            assert loaded is not None, f"Failed to load {block_hash!r}"
+            assert len(loaded) == 1
+        elapsed = time_mod.time() - t0
+
+        # 5 loads from SSD should complete in well under 5s
+        # (each ~2ms read + reconstruction)
+        assert elapsed < 5.0, (
+            f"Sequential loads took {elapsed:.1f}s — possible queue blocking"
+        )
 
     def test_writer_error_handling(self, ssd_cache, mx):
         """Verify that writer errors clean up the index."""
