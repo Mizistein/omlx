@@ -100,7 +100,20 @@ oMLX is built on top of [vllm-mlx](https://github.com/waybarrios/vllm-mlx), exte
 | `POST /v1/rerank` | Document reranking |
 | `GET /v1/models` | List available models |
 
-**Tool calling & structured output** - Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration.
+**Tool calling & structured output** - Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration. Tool calling requires the model's chat template to support the `tools` parameter. The following model families are auto-detected via mlx-lm's built-in tool parsers:
+
+| Model Family | Format |
+|---|---|
+| Llama, Qwen, DeepSeek, etc. | JSON `<tool_call>` |
+| Qwen3 Coder | XML `<function=...>` |
+| Gemma | `<start_function_call>` |
+| GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
+| MiniMax | Namespaced `<minimax:tool_call>` |
+| Mistral | `[TOOL_CALLS]` |
+| Kimi K2 | `<\|tool_calls_section_begin\|>` |
+| Longcat | `<longcat_tool_call>` |
+
+Models not listed above may still work if their chat template accepts `tools` and their output uses a recognized `<tool_call>` XML format. Streaming requests with tool calls buffer all content and emit results at completion.
 
 ## Models
 
@@ -166,12 +179,33 @@ FastAPI Server (OpenAI / Anthropic API)
 
 ## Development
 
+### CLI Server
+
 ```bash
 git clone https://github.com/jundot/omlx.git
 cd omlx
 pip install -e ".[dev]"
 pytest -m "not slow"
 ```
+
+### macOS App
+
+Requires Python 3.11+ and [venvstacks](https://venvstacks.lmstudio.ai) (`pip install venvstacks`).
+
+```bash
+cd packaging
+
+# Full build (venvstacks + app bundle + DMG)
+python build.py
+
+# Skip venvstacks (code changes only)
+python build.py --skip-venv
+
+# DMG only
+python build.py --dmg-only
+```
+
+See [packaging/README.md](packaging/README.md) for details on the app bundle structure and layer configuration.
 
 ## Contributing
 
