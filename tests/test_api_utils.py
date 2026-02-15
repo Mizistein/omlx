@@ -111,12 +111,42 @@ class TestCleanOutputText:
         result = clean_output_text("<|im_start|>Hello<|im_end|><|endoftext|>")
         assert result == "Hello"
 
-    def test_preserves_think_tags(self):
-        """Test that <think>...</think> tags are preserved."""
+    def test_removes_think_tags(self):
+        """Test that <think>...</think> tags are removed."""
         result = clean_output_text("<think>reasoning</think>Answer")
-        assert "<think>" in result
-        assert "</think>" in result
-        assert "reasoning" in result
+        assert "<think>" not in result
+        assert "</think>" not in result
+        assert "reasoning" not in result
+        assert result == "Answer"
+
+    def test_removes_multiple_think_blocks(self):
+        """Test removing multiple consecutive think blocks."""
+        result = clean_output_text("<think>a</think><think>b</think>Text")
+        assert "<think>" not in result
+        assert result == "Text"
+
+    def test_removes_partial_think_closing(self):
+        """Test removing partial </think> without opening tag."""
+        result = clean_output_text("thinking content</think>Answer")
+        assert "</think>" not in result
+        assert result == "Answer"
+
+    def test_removes_empty_think_blocks(self):
+        """Test removing empty think blocks."""
+        result = clean_output_text("<think></think>Text")
+        assert result == "Text"
+
+    def test_preserves_text_without_think_tags(self):
+        """Test that normal text is unaffected."""
+        result = clean_output_text("Normal response text")
+        assert result == "Normal response text"
+
+    def test_removes_think_with_newlines(self):
+        """Test removing think blocks containing newlines."""
+        result = clean_output_text("<think>\nreasoning\nprocess\n</think>Answer")
+        assert "<think>" not in result
+        assert "reasoning" not in result
+        assert result == "Answer"
 
     def test_clean_whitespace(self):
         """Test that result is stripped."""
