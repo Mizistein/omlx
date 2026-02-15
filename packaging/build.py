@@ -164,6 +164,40 @@ def _find_wheel_for_package(pkg_name: str) -> Path | None:
     return None
 
 
+def _write_engine_commits(omlx_pkg_dir: Path):
+    """Write _engine_commits.json to the omlx package for runtime SHA display.
+
+    Extracts commit SHAs from venvstacks.toml git URLs and writes them
+    so _get_engine_info() can show clickable commit links in the admin dashboard.
+    """
+    import json
+
+    toml_path = SCRIPT_DIR / "venvstacks.toml"
+    git_reqs = _parse_git_requirements(toml_path)
+
+    repo_urls = {
+        "mlx-lm": "https://github.com/ml-explore/mlx-lm",
+        "mlx-embeddings": "https://github.com/Blaizzy/mlx-embeddings",
+    }
+
+    commits = {}
+    for full_req, git_url in git_reqs:
+        pkg_name = full_req.split("@")[0].strip().lower()
+        # git_url format: git+https://github.com/ml-explore/mlx-lm@bcf6306...
+        if "@" in git_url:
+            commit = git_url.rsplit("@", 1)[1]
+            if pkg_name in repo_urls:
+                commits[pkg_name] = {
+                    "commit": commit,
+                    "url": repo_urls[pkg_name],
+                }
+
+    if commits:
+        commits_file = omlx_pkg_dir / "_engine_commits.json"
+        commits_file.write_text(json.dumps(commits, indent=2) + "\n")
+        print(f"  Generated _engine_commits.json: {list(commits.keys())}")
+
+
 def _create_resolved_toml(version_map: dict[str, str]) -> Path:
     """Create a temporary venvstacks.toml with git URLs replaced by local file:// paths.
 
@@ -246,6 +280,127 @@ def build_venvstacks():
     return EXPORT_DIR
 
 
+def _create_c_launcher(macos_dir: Path, app_name: str):
+    """Compile a native Mach-O launcher binary that sets up Python environment and exec's python3.
+
+    A compiled binary (not a bash script) is required as CFBundleExecutable
+    so that macOS LaunchServices properly grants WindowServer GUI access
+    to the process. Bash script launchers can lose GUI session context
+    when exec'ing into python3, causing PyObjC menubar apps to fail silently.
+
+    The launcher:
+    - Detects both Python/ (release) and Frameworks/ (dev) directories
+    - Sets PYTHONHOME, PYTHONPATH, PYTHONDONTWRITEBYTECODE
+    - exec's python3 -m omlx_app (same PID, inherits GUI session)
+    - Shows an error dialog via osascript if exec fails
+    """
+    launcher_c = macos_dir / "_launcher.c"
+    launcher_c.write_text(r'''
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <limits.h>
+#include <errno.h>
+#include <mach-o/dyld.h>
+
+static void show_error(const char *msg) {
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+        "osascript -e 'display dialog \"%s\" buttons {\"OK\"} "
+        "default button 1 with icon stop with title \"oMLX\"'",
+        msg);
+    system(cmd);
+}
+
+int main(int argc, char *argv[]) {
+    char exe_buf[PATH_MAX];
+    char resolved[PATH_MAX];
+    uint32_t size = sizeof(exe_buf);
+
+    if (_NSGetExecutablePath(exe_buf, &size) != 0) {
+        show_error("Failed to get executable path.");
+        return 1;
+    }
+    if (!realpath(exe_buf, resolved)) {
+        show_error("Failed to resolve executable path.");
+        return 1;
+    }
+
+    /* Trim executable name to get MacOS/ directory */
+    char *slash = strrchr(resolved, '/');
+    if (!slash) { show_error("Invalid path."); return 1; }
+    *slash = '\0';
+    char macos_dir[PATH_MAX];
+    strncpy(macos_dir, resolved, sizeof(macos_dir) - 1);
+
+    /* Trim MacOS to get Contents/ directory */
+    slash = strrchr(resolved, '/');
+    if (!slash) { show_error("Invalid bundle structure."); return 1; }
+    *slash = '\0';
+    char contents_dir[PATH_MAX];
+    strncpy(contents_dir, resolved, sizeof(contents_dir) - 1);
+
+    /* Detect Python layer directory: Python/ (release) or Frameworks/ (dev) */
+    char layers_dir[PATH_MAX];
+    snprintf(layers_dir, sizeof(layers_dir), "%s/Python", contents_dir);
+    if (access(layers_dir, F_OK) != 0) {
+        snprintf(layers_dir, sizeof(layers_dir), "%s/Frameworks", contents_dir);
+        if (access(layers_dir, F_OK) != 0) {
+            show_error("Python runtime not found in app bundle.");
+            return 1;
+        }
+    }
+
+    /* Set PYTHONHOME */
+    char pythonhome[PATH_MAX];
+    snprintf(pythonhome, sizeof(pythonhome), "%s/cpython-3.11", layers_dir);
+    setenv("PYTHONHOME", pythonhome, 1);
+
+    /* Set PYTHONPATH */
+    char pythonpath[PATH_MAX * 4];
+    snprintf(pythonpath, sizeof(pythonpath),
+        "%s/Resources:%s/app-omlx-app/lib/python3.11/site-packages:"
+        "%s/framework-mlx-framework/lib/python3.11/site-packages",
+        contents_dir, layers_dir, layers_dir);
+    setenv("PYTHONPATH", pythonpath, 1);
+
+    /* Prevent .pyc generation at runtime */
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
+
+    /* exec python3 from MacOS/ directory (same PID, inherits GUI session) */
+    char python_bin[PATH_MAX];
+    snprintf(python_bin, sizeof(python_bin), "%s/python3", macos_dir);
+
+    if (access(python_bin, X_OK) != 0) {
+        show_error("Python executable not found in app bundle.");
+        return 1;
+    }
+
+    execl(python_bin, "python3", "-m", "omlx_app", NULL);
+
+    /* exec failed */
+    char err[512];
+    snprintf(err, sizeof(err), "Failed to launch Python: %s", strerror(errno));
+    show_error(err);
+    return 1;
+}
+''')
+
+    launcher_bin = macos_dir / app_name
+    result = subprocess.run(
+        ["cc", "-arch", "arm64", "-mmacosx-version-min=14.0", "-O2",
+         "-o", str(launcher_bin), str(launcher_c)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"  ✗ Launcher compilation failed: {result.stderr}")
+        sys.exit(1)
+
+    launcher_c.unlink()
+    launcher_bin.chmod(0o755)
+
+
 def create_app_bundle():
     """Create macOS .app bundle."""
     print("\n[2/4] Creating app bundle...")
@@ -295,6 +450,9 @@ def create_app_bundle():
             "__pycache__", "*.pyc", ".git", "tests", "examples"
         ))
 
+    # Generate _engine_commits.json for engine SHA display in admin dashboard
+    _write_engine_commits(omlx_dst)
+
     # Copy SVG logo files to Resources for menubar icons
     print("  Copying logo SVGs...")
     admin_static = SCRIPT_DIR.parent / "omlx" / "admin" / "static"
@@ -325,31 +483,9 @@ def create_app_bundle():
         "../Frameworks/cpython-3.11/lib/libpython3.11.dylib"
     )
 
-    # Create launcher script
+    # Create compiled C launcher binary
     print("  Creating launcher...")
-    launcher = macos_dir / APP_NAME
-    launcher_content = f'''#!/bin/bash
-# oMLX Launcher
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONTENTS_DIR="$(dirname "$SCRIPT_DIR")"
-RESOURCES_DIR="$CONTENTS_DIR/Resources"
-FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
-
-# Set PYTHONHOME so Python can find its stdlib
-export PYTHONHOME="$FRAMEWORKS_DIR/cpython-3.11"
-
-# Set PYTHONPATH: Resources (omlx_app, omlx) + all venvstacks layer site-packages
-export PYTHONPATH="$RESOURCES_DIR:$FRAMEWORKS_DIR/app-omlx-app/lib/python3.11/site-packages:$FRAMEWORKS_DIR/framework-mlx-framework/lib/python3.11/site-packages"
-
-# Prevent .pyc generation at runtime (pre-compiled during build)
-export PYTHONDONTWRITEBYTECODE=1
-
-# Run Python from inside Contents/MacOS/ (required for macOS GUI access)
-exec "$SCRIPT_DIR/python3" -m omlx_app
-'''
-    launcher.write_text(launcher_content)
-    launcher.chmod(0o755)
+    _create_c_launcher(macos_dir, APP_NAME)
 
     # Create Info.plist
     print("  Creating Info.plist...")
@@ -546,15 +682,32 @@ def _png_to_icns(png_path: str, icon_path: Path, resources_dir: Path):
 
 
 def sign_app(app_dir: Path):
-    """Ad-hoc sign the app bundle."""
+    """Ad-hoc sign the app bundle for development.
+
+    Uses --deep to recursively sign subcomponents. This may fail on
+    venvstacks layers (e.g. cpython-3.11 in Frameworks/) because codesign
+    treats dotted directory names as framework bundles.
+
+    If signing fails, the broken _CodeSignature is removed so the app
+    can still run unsigned on the developer's machine. Release builds
+    use build_release.py which relocates Frameworks/ to Python/ first.
+    """
     print("\n[3/4] Signing app bundle...")
 
-    run_cmd([
-        "codesign", "--force", "--deep", "--sign", "-",
-        str(app_dir)
-    ], check=False)
+    result = subprocess.run(
+        ["codesign", "--force", "--deep", "--sign", "-", str(app_dir)],
+        capture_output=True,
+    )
 
-    print(f"  ✓ Signed {app_dir}")
+    if result.returncode != 0:
+        # --deep signing failed (likely due to dotted dir names in Frameworks/).
+        # Remove the broken _CodeSignature so macOS doesn't show "damaged" error.
+        codesig = app_dir / "Contents" / "_CodeSignature"
+        if codesig.exists():
+            shutil.rmtree(codesig)
+        print("  ⚠ Deep signing failed (expected for dev builds), running unsigned")
+    else:
+        print(f"  ✓ Signed {app_dir}")
 
 
 def create_dmg(app_dir: Path):

@@ -101,3 +101,6 @@ packaging/_wheels/
 packaging/_export/
 packaging/_build/
 *.dmg
+
+# Generated engine commit metadata (build-time artifact)
+omlx/_engine_commits.json
