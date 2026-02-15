@@ -281,18 +281,22 @@ def build_venvstacks():
 
 
 def _create_c_launcher(macos_dir: Path, app_name: str):
-    """Compile a native Mach-O launcher binary that sets up Python environment and exec's python3.
+    """Compile a native Mach-O launcher binary for macOS menubar app startup.
 
     A compiled binary (not a bash script) is required as CFBundleExecutable
     so that macOS LaunchServices properly grants WindowServer GUI access
-    to the process. Bash script launchers can lose GUI session context
-    when exec'ing into python3, causing PyObjC menubar apps to fail silently.
+    to the process.
+
+    On macOS Tahoe, exec-trampoline launchers (CFBundleExecutable -> launcher
+    -> exec python3) can end up in a NotVisible state for status bar apps.
+    To avoid this, the launcher initializes Python in-process via Py_BytesMain
+    instead of replacing itself with exec().
 
     The launcher:
     - Detects both Python/ (release) and Frameworks/ (dev) directories
     - Sets PYTHONHOME, PYTHONPATH, PYTHONDONTWRITEBYTECODE
-    - exec's python3 -m omlx_app (same PID, inherits GUI session)
-    - Shows an error dialog via osascript if exec fails
+    - Loads bundled libpython3.11.dylib and calls Py_BytesMain("-m omlx_app")
+    - Shows an error dialog via osascript if startup fails
     """
     launcher_c = macos_dir / "_launcher.c"
     launcher_c.write_text(r'''
@@ -302,7 +306,10 @@ def _create_c_launcher(macos_dir: Path, app_name: str):
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <dlfcn.h>
 #include <mach-o/dyld.h>
+
+typedef int (*py_bytes_main_fn)(int, char **);
 
 static void show_error(const char *msg) {
     char cmd[2048];
@@ -368,22 +375,36 @@ int main(int argc, char *argv[]) {
     /* Prevent .pyc generation at runtime */
     setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
 
-    /* exec python3 from MacOS/ directory (same PID, inherits GUI session) */
+    /* Ensure bundled python3 exists (used later by server subprocesses). */
     char python_bin[PATH_MAX];
     snprintf(python_bin, sizeof(python_bin), "%s/python3", macos_dir);
-
     if (access(python_bin, X_OK) != 0) {
         show_error("Python executable not found in app bundle.");
         return 1;
     }
 
-    execl(python_bin, "python3", "-m", "omlx_app", NULL);
+    /* Load bundled libpython and run -m omlx_app in-process (no exec trampoline). */
+    char libpython[PATH_MAX];
+    snprintf(libpython, sizeof(libpython), "%s/lib/libpython3.11.dylib", contents_dir);
+    void *py = dlopen(libpython, RTLD_NOW | RTLD_GLOBAL);
+    if (!py) {
+        char err[1024];
+        snprintf(err, sizeof(err), "Failed to load libpython: %s", dlerror());
+        show_error(err);
+        return 1;
+    }
 
-    /* exec failed */
-    char err[512];
-    snprintf(err, sizeof(err), "Failed to launch Python: %s", strerror(errno));
-    show_error(err);
-    return 1;
+    py_bytes_main_fn py_bytes_main = (py_bytes_main_fn)dlsym(py, "Py_BytesMain");
+    if (!py_bytes_main) {
+        char err[1024];
+        snprintf(err, sizeof(err), "Failed to resolve Py_BytesMain: %s", dlerror());
+        show_error(err);
+        return 1;
+    }
+
+    char *py_argv[] = {"oMLX", "-m", "omlx_app", NULL};
+    int rc = py_bytes_main(3, py_argv);
+    return rc;
 }
 ''')
 

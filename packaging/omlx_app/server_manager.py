@@ -27,6 +27,18 @@ class ServerStatus(Enum):
 
 def get_bundled_python() -> str:
     """Get the path to the bundled Python executable."""
+    exe = Path(sys.executable)
+
+    # Normal case: running under bundled python directly.
+    if exe.name == "python3":
+        return str(exe)
+
+    # Menubar launcher case: sys.executable may be .../Contents/MacOS/oMLX.
+    candidate = exe.with_name("python3")
+    if candidate.exists():
+        return str(candidate)
+
+    # Fallback to current executable if layout is unexpected.
     return sys.executable
 
 

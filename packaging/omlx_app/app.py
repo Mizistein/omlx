@@ -19,6 +19,7 @@ from AppKit import (
     NSAppearanceNameDarkAqua,
     NSApplication,
     NSApplicationActivationPolicyAccessory,
+    NSApplicationActivationPolicyRegular,
     NSAttributedString,
     NSBundle,
     NSColor,
@@ -67,6 +68,18 @@ class OMLXAppDelegate(NSObject):
             self._doFinishLaunching()
         except Exception as e:
             logger.error(f"Launch failed: {e}", exc_info=True)
+            self._show_fatal_error_and_quit(str(e))
+
+    def _show_fatal_error_and_quit(self, message: str):
+        """Show a fatal error dialog and terminate the application."""
+        from AppKit import NSAlert
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("oMLX Failed to Launch")
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("Quit")
+        alert.runModal()
+        NSApp.terminate_(None)
 
     def _doFinishLaunching(self):
         """Actual launch logic (separated for proper exception handling)."""
@@ -92,6 +105,14 @@ class OMLXAppDelegate(NSObject):
         NSRunLoop.currentRunLoop().addTimer_forMode_(
             self.health_timer, NSDefaultRunLoopMode
         )
+
+        # Switch from Regular to Accessory policy now that the status bar
+        # item exists. This hides the Dock icon while keeping the menubar item.
+        # We start as Regular (in main()) so macOS grants full GUI access,
+        # then switch here — required on macOS Tahoe where Accessory apps
+        # launched via LaunchServices remain "NotVisible" otherwise.
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        NSApp.activateIgnoringOtherApps_(True)
 
         logger.info("oMLX menubar app launched successfully")
 
@@ -648,7 +669,12 @@ def main():
     from PyObjCTools import AppHelper
 
     app = NSApplication.sharedApplication()
-    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    # Set Regular policy first so macOS grants full GUI access on launch,
+    # then switch to Accessory in applicationDidFinishLaunching_ after
+    # the status bar item is created. This ensures the menubar icon is
+    # visible on macOS Tahoe where Accessory apps launched via
+    # LaunchServices may remain in "NotVisible" state.
+    app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
     delegate = OMLXAppDelegate.alloc().init()
     app.setDelegate_(delegate)
     AppHelper.runEventLoop()
